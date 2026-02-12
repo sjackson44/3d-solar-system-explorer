@@ -2755,7 +2755,7 @@ export default function App() {
   const [autoRoamSpeed, setAutoRoamSpeed] = useState(0.2)
   const [autoRoamStatus, setAutoRoamStatus] = useState(null)
   const [roamTrackerCollapsed, setRoamTrackerCollapsed] = useState(false)
-  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
   const [showOrbitLines, setShowOrbitLines] = useState(false)
   const [viewMode, setViewMode] = useState('space')
   const [mapCenter, setMapCenter] = useState({ lat: 0, lng: 0 })
