@@ -1,6 +1,6 @@
 # 3D Solar System Explorer
 
-A fun, educational 3D solar system app built to help kids explore space.
+A fun, educational 3D solar system app built to help my kids explore space.
 
 It includes:
 - The Sun, planets, and selected major moons
@@ -11,7 +11,7 @@ It includes:
 
 ## Why This App Exists
 
-This project is meant to make learning the solar system interactive and visual. Instead of only reading facts, kids can fly around space, focus on planets/moons, and see how everything relates in one scene.
+This project is meant to make learning the solar system interactive and visual. Instead of only reading facts, you can fly around space, focus on planets/moons, and see how everything relates in one scene.
 
 ## Tech Stack
 
