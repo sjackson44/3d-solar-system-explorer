@@ -216,6 +216,25 @@ body,
   color: var(--panel-muted);
 }
 
+.mode-switch {
+  margin: 0 0 0.75rem;
+}
+
+.mode-switch-label {
+  margin: 0 0 0.42rem;
+  color: var(--panel-muted);
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.mode-switch-buttons {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
 .hud label {
   display: block;
   margin-bottom: 0.35rem;
@@ -258,6 +277,23 @@ body,
 
 .hud button:hover {
   background: var(--control-hover);
+}
+
+.hud .mode-switch-button {
+  border: 1px solid var(--control-border);
+  background: rgba(58, 36, 22, 0.52);
+  color: var(--panel-text);
+  border-radius: 999px;
+  padding: 0.38rem 0.75rem;
+  cursor: pointer;
+  font-weight: 600;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.hud .mode-switch-button.active {
+  background: rgba(124, 78, 46, 0.82);
+  border-color: rgba(232, 179, 103, 0.88);
+  color: #fff6ea;
 }
 
 .fact-panel {

@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls, Stars, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
-import { AstroTime, Body, HelioVector } from 'astronomy-engine'
-import { bodies, orbitalBands } from './data'
+import { AstroTime, Body, GeoMoon, HelioVector, JupiterMoons } from 'astronomy-engine'
+import { bodies, orbitalBands, scientificBodies, scientificOrbitalBands } from './data'
 
 const ORBIT_SPEED = 0.2
 const SPIN_SPEED = 1.2
@@ -18,9 +18,79 @@ const MAP_EXIT_ARM_DELAY_MS = 1200
 const MAP_EXIT_WHEEL_RECENCY_MS = 450
 const FOLLOW_RELEASE_DISTANCE_MULTIPLIER = 10
 const FOLLOW_RELEASE_MIN_DISTANCE = 18
-const EARTH_PLANET = bodies.planets.find((planet) => planet.name === 'Earth')
-const EARTH_START_DISTANCE = EARTH_PLANET?.distance ?? 50
-const EARTH_START_RADIUS = EARTH_PLANET?.radius ?? 1
+const EARTH_FALLBACK_DISTANCE = 50
+const EARTH_FALLBACK_RADIUS = 1
+const FUN_SCENE_CONFIG = {
+  backgroundColor: '#030617',
+  homeCamera: [0, 60, 260],
+  canvasFar: 70_000,
+  controlsMaxDistance: 34_000,
+  starsRadius: 28_000,
+  starsDepth: 16_000,
+  starsCount: 15_500,
+  starsFactor: 6.2,
+  starsSpeed: 0.18,
+  starShellRadius: 42_000,
+  starShellCount: 18_000,
+  starShellColor: '#d9e8ff',
+  starShellOpacity: 0.28,
+  starShellSize: 1.95,
+  deepSpaceRadius: 12_000,
+  deepSpaceSpread: 4_200,
+  deepSpaceCount: 12_500,
+  deepSpaceColor: '#ecf6ff',
+  deepSpaceOpacity: 0.44,
+  deepSpaceSize: 2.0,
+  galacticBandColor: '#8fb4ff',
+  galacticBandOpacity: 0.15,
+  galacticBandThickness: 780,
+  nebulaOpacity: 0.16,
+  asteroidCount: 5_800,
+  asteroidThickness: 3.6,
+  asteroidSize: 0.36,
+  kuiperCount: 8_000,
+  kuiperThickness: 24,
+  kuiperSize: 0.46,
+  oortRadius: 3_400,
+  oortSpread: 500,
+  oortCount: 10_000
+}
+const SCIENTIFIC_SCENE_CONFIG = {
+  backgroundColor: '#02040a',
+  homeCamera: [0, 600, 2_600],
+  canvasFar: 12_000_000,
+  controlsMaxDistancePlanet: 300_000,
+  controlsMaxDistanceSun: 9_000_000,
+  starsRadius: 2_200_000,
+  starsDepth: 1_100_000,
+  starsCount: 22_000,
+  starsFactor: 6.1,
+  starsSpeed: 0.05,
+  starShellRadius: 4_000_000,
+  starShellCount: 22_000,
+  starShellColor: '#edf3ff',
+  starShellOpacity: 0.32,
+  starShellSize: 1.9,
+  deepSpaceRadius: 1_000_000,
+  deepSpaceSpread: 500_000,
+  deepSpaceCount: 20_000,
+  deepSpaceColor: '#f4f8ff',
+  deepSpaceOpacity: 0.38,
+  deepSpaceSize: 1.85,
+  galacticBandColor: '#c3d7f8',
+  galacticBandOpacity: 0.18,
+  galacticBandThickness: 200_000,
+  nebulaOpacity: 0,
+  asteroidCount: 45_000,
+  asteroidThickness: 36,
+  asteroidSize: 0.4,
+  kuiperCount: 65_000,
+  kuiperThickness: 240,
+  kuiperSize: 0.52,
+  oortRadius: 3_500_000,
+  oortSpread: 550_000,
+  oortCount: 70_000
+}
 const PLANET_TO_BODY = {
   Mercury: Body.Mercury,
   Venus: Body.Venus,
@@ -32,13 +102,152 @@ const PLANET_TO_BODY = {
   Neptune: Body.Neptune,
   Pluto: Body.Pluto
 }
+function configureTexture(texture) {
+  if (!texture) return
+  texture.anisotropy = 8
+  texture.wrapS = THREE.RepeatWrapping
+  texture.wrapT = THREE.ClampToEdgeWrapping
+  texture.minFilter = THREE.LinearMipmapLinearFilter
+  texture.magFilter = THREE.LinearFilter
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.needsUpdate = true
+}
 
-function getStartupOrbitAngles() {
+function getStartupMoonOrbitAngles(planets) {
+  const days = Date.now() / 86_400_000
+  const state = {}
+
+  planets.forEach((planet) => {
+    planet.moons.forEach((moon) => {
+      const key = `${planet.name}/${moon.name}`
+      const orbitDays = Math.max(Math.abs(moon.orbitPeriod), 0.001) * 365.25
+      const phase = ((days / orbitDays) + hashPhase(`${key}:phase`)) % 1
+      state[key] = {
+        angle: phase * Math.PI * 2,
+        inclinationRad: THREE.MathUtils.degToRad(moon.orbitalInclinationDeg ?? 0),
+        ascendingNodeRad: THREE.MathUtils.degToRad(moon.ascendingNodeDeg ?? hashPhase(`${key}:node`) * 360)
+      }
+    })
+  })
+
+  return state
+}
+
+function hashPhase(seed) {
+  let hash = 2166136261
+  for (let i = 0; i < seed.length; i += 1) {
+    hash ^= seed.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return ((hash >>> 0) % 360) / 360
+}
+
+function getScientificMoonOrbitState(planets, horizonsSnapshot = null) {
+  const time = new AstroTime(new Date())
+  const days = Date.now() / 86_400_000
+  const state = {}
+  const horizonBodies = horizonsSnapshot?.bodies ?? null
+  const hasHorizonsData = Boolean(horizonBodies && Object.keys(horizonBodies).length > 0)
+
+  const setFallback = (planetName, moon) => {
+    const key = `${planetName}/${moon.name}`
+    const orbitDays = Math.max(Math.abs(moon.orbitPeriod), 0.001) * 365.25
+    const phaseOffset = hashPhase(key)
+    const phase = ((days / orbitDays) + phaseOffset) % 1
+    const isEarthMoon = key === 'Earth/Moon'
+    state[key] = {
+      angle: phase * Math.PI * 2,
+      inclinationRad: isEarthMoon ? 0 : THREE.MathUtils.degToRad(moon.orbitalInclinationDeg ?? 0),
+      ascendingNodeRad: isEarthMoon ? 0 : THREE.MathUtils.degToRad(moon.ascendingNodeDeg ?? hashPhase(`${key}:node`) * 360)
+    }
+  }
+
+  planets.forEach((planet) => {
+    planet.moons.forEach((moon) => setFallback(planet.name, moon))
+  })
+
+  planets.forEach((planet) => {
+    planet.moons.forEach((moon) => {
+      const vector = horizonBodies?.[moon.name]?.vector
+      if (!vector) return
+      const key = `${planet.name}/${moon.name}`
+      const isEarthMoon = key === 'Earth/Moon'
+      // Use Horizons vector for phase angle only. Plane orientation comes from moon orbital elements.
+      state[key] = {
+        angle: Math.atan2(vector.z, vector.x),
+        inclinationRad: isEarthMoon ? 0 : THREE.MathUtils.degToRad(moon.orbitalInclinationDeg ?? 0),
+        ascendingNodeRad: isEarthMoon ? 0 : THREE.MathUtils.degToRad(moon.ascendingNodeDeg ?? hashPhase(`${key}:node`) * 360)
+      }
+    })
+  })
+
+  // Keep astronomy-engine only as a local fallback when Horizons data is unavailable.
+  if (!hasHorizonsData) {
+    const earthMoonVec = GeoMoon(time)
+    if (earthMoonVec) {
+      const key = 'Earth/Moon'
+      if (state[key]) {
+        state[key] = {
+          ...state[key],
+          angle: Math.atan2(earthMoonVec.z, earthMoonVec.x)
+        }
+      }
+    }
+
+    const jupiter = JupiterMoons(time)
+    const jupiterMoonMap = {
+      Io: jupiter?.io,
+      Europa: jupiter?.europa,
+      Ganymede: jupiter?.ganymede,
+      Callisto: jupiter?.callisto
+    }
+    Object.entries(jupiterMoonMap).forEach(([moonName, vec]) => {
+      if (!vec) return
+      const key = `Jupiter/${moonName}`
+      if (state[key]) {
+        state[key] = {
+          ...state[key],
+          angle: Math.atan2(vec.z, vec.x)
+        }
+      }
+    })
+  }
+
+  return state
+}
+
+function getStartupSpinAngles(planets) {
+  const days = Date.now() / 86_400_000
+  const angles = {}
+
+  planets.forEach((planet) => {
+    const period = Number(planet.rotationPeriod)
+    if (!Number.isFinite(period) || period === 0) {
+      angles[planet.name] = 0
+      return
+    }
+    const phase = (days / Math.abs(period)) % 1
+    angles[planet.name] = phase * Math.PI * 2
+  })
+
+  return angles
+}
+
+function getStartupOrbitAngles(planets, horizonsSnapshot = null) {
   try {
-    const time = new AstroTime(new Date())
     const nextAngles = {}
+    const horizonBodies = horizonsSnapshot?.bodies ?? null
 
-    bodies.planets.forEach((planet) => {
+    planets.forEach((planet) => {
+      const vector = horizonBodies?.[planet.name]?.vector
+      if (!vector) return
+      nextAngles[planet.name] = Math.atan2(vector.z, vector.x)
+    })
+
+    const time = new AstroTime(new Date())
+
+    planets.forEach((planet) => {
+      if (nextAngles[planet.name] !== undefined) return
       const astroBody = PLANET_TO_BODY[planet.name]
       if (!astroBody) {
         nextAngles[planet.name] = Math.random() * Math.PI * 2
@@ -55,7 +264,7 @@ function getStartupOrbitAngles() {
     return nextAngles
   } catch {
     const fallbackAngles = {}
-    bodies.planets.forEach((planet) => {
+    planets.forEach((planet) => {
       fallbackAngles[planet.name] = Math.random() * Math.PI * 2
     })
     return fallbackAngles
@@ -78,6 +287,13 @@ function loadGoogleMapsScript(apiKey) {
 
       const cleanup = () => {
         window.clearTimeout(timeoutId)
+        if (window.gm_authFailure === authFailureHandler) {
+          if (typeof priorAuthFailure === 'function') {
+            window.gm_authFailure = priorAuthFailure
+          } else {
+            window.gm_authFailure = undefined
+          }
+        }
         try {
           delete window[callbackName]
         } catch {
@@ -95,14 +311,15 @@ function loadGoogleMapsScript(apiKey) {
       }
 
       const priorAuthFailure = window.gm_authFailure
-      window.gm_authFailure = () => {
+      const authFailureHandler = () => {
         if (typeof priorAuthFailure === 'function') priorAuthFailure()
         cleanup()
         reject(new Error('Google Maps authentication failed. Check key restrictions and enabled APIs.'))
       }
+      window.gm_authFailure = authFailureHandler
 
       const script = document.createElement('script')
-      script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=beta&libraries=maps3d&callback=${callbackName}`
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=beta&loading=async&libraries=maps3d&callback=${callbackName}`
       script.async = true
       script.defer = true
       script.onerror = () => {
@@ -318,7 +535,7 @@ function OortCloud({ radius = 3400, spread = 500, count = 10000 }) {
   )
 }
 
-function DeepSpaceField({ radius = 12000, spread = 4200, count = 15000 }) {
+function DeepSpaceField({ radius = 12000, spread = 4200, count = 15000, color = '#f4fbff', opacity = 0.58, size = 2.2 }) {
   const positions = useMemo(() => {
     const arr = new Float32Array(count * 3)
 
@@ -339,12 +556,12 @@ function DeepSpaceField({ radius = 12000, spread = 4200, count = 15000 }) {
       <bufferGeometry>
         <bufferAttribute attach="attributes-position" count={positions.length / 3} array={positions} itemSize={3} />
       </bufferGeometry>
-      <pointsMaterial color="#f4fbff" size={2.2} sizeAttenuation transparent opacity={0.58} />
+      <pointsMaterial color={color} size={size} sizeAttenuation transparent opacity={opacity} />
     </points>
   )
 }
 
-function CameraLockedStarShell({ radius = 42000, count = 18000 }) {
+function CameraLockedStarShell({ radius = 42000, count = 18000, color = '#e7f1ff', opacity = 0.34, size = 2.1 }) {
   const { camera } = useThree()
   const shellRef = useRef()
 
@@ -372,25 +589,127 @@ function CameraLockedStarShell({ radius = 42000, count = 18000 }) {
       <bufferGeometry>
         <bufferAttribute attach="attributes-position" count={positions.length / 3} array={positions} itemSize={3} />
       </bufferGeometry>
-      <pointsMaterial color="#e7f1ff" size={2.1} sizeAttenuation={false} transparent opacity={0.34} />
+      <pointsMaterial color={color} size={size} sizeAttenuation={false} transparent opacity={opacity} />
     </points>
   )
 }
 
-function Moon({ moon, parentName, speedScale, registerBodyRef, onSelectTarget, freezeAllMotion }) {
+function CameraLockedGalacticBand({ radius = 42000, count = 18000, thickness = 900, color = '#9db8e8', opacity = 0.2 }) {
+  const { camera } = useThree()
+  const bandRef = useRef()
+
+  const positions = useMemo(() => {
+    const arr = new Float32Array(count * 3)
+    for (let i = 0; i < count; i += 1) {
+      const theta = Math.random() * Math.PI * 2
+      const bandR = radius * (0.72 + Math.random() * 0.24)
+      const y = (Math.random() - 0.5) * thickness
+      arr[i * 3] = Math.cos(theta) * bandR
+      arr[i * 3 + 1] = y
+      arr[i * 3 + 2] = Math.sin(theta) * bandR
+    }
+    return arr
+  }, [count, radius, thickness])
+
+  useFrame(() => {
+    if (!bandRef.current) return
+    bandRef.current.position.copy(camera.position)
+  })
+
+  return (
+    <points ref={bandRef} rotation={[0.42, 0.76, 0]}>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" count={positions.length / 3} array={positions} itemSize={3} />
+      </bufferGeometry>
+      <pointsMaterial color={color} size={1.7} sizeAttenuation={false} transparent opacity={opacity} />
+    </points>
+  )
+}
+
+function CameraLockedNebula({ radius = 42000, count = 12000, opacity = 0.3 }) {
+  const { camera } = useThree()
+  const nebulaRef = useRef()
+
+  const { positions, colors } = useMemo(() => {
+    const p = new Float32Array(count * 3)
+    const c = new Float32Array(count * 3)
+    const cloudCenters = [
+      new THREE.Vector3(0.88, 0.18, 0.22),
+      new THREE.Vector3(-0.54, 0.22, 0.8),
+      new THREE.Vector3(-0.22, -0.35, -0.91)
+    ]
+    const cloudColors = [
+      new THREE.Color('#6ecbff'),
+      new THREE.Color('#76a6ff'),
+      new THREE.Color('#f49bd7')
+    ]
+
+    for (let i = 0; i < count; i += 1) {
+      const cluster = i % cloudCenters.length
+      const center = cloudCenters[cluster]
+      const jitter = new THREE.Vector3((Math.random() - 0.5) * 0.85, (Math.random() - 0.5) * 0.65, (Math.random() - 0.5) * 0.85)
+      const dir = center.clone().add(jitter).normalize()
+      const r = radius * (0.78 + Math.random() * 0.17)
+      p[i * 3] = dir.x * r
+      p[i * 3 + 1] = dir.y * r
+      p[i * 3 + 2] = dir.z * r
+
+      const color = cloudColors[cluster].clone().lerp(new THREE.Color('#ffffff'), Math.random() * 0.28)
+      c[i * 3] = color.r
+      c[i * 3 + 1] = color.g
+      c[i * 3 + 2] = color.b
+    }
+
+    return { positions: p, colors: c }
+  }, [count, radius])
+
+  useFrame(() => {
+    if (!nebulaRef.current) return
+    nebulaRef.current.position.copy(camera.position)
+  })
+
+  return (
+    <points ref={nebulaRef}>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" count={positions.length / 3} array={positions} itemSize={3} />
+        <bufferAttribute attach="attributes-color" count={colors.length / 3} array={colors} itemSize={3} />
+      </bufferGeometry>
+      <pointsMaterial
+        vertexColors
+        size={3.2}
+        sizeAttenuation={false}
+        transparent
+        opacity={opacity}
+        depthWrite={false}
+        blending={THREE.AdditiveBlending}
+      />
+    </points>
+  )
+}
+
+function Moon({
+  moon,
+  parentName,
+  speedScale,
+  registerBodyRef,
+  onSelectTarget,
+  freezeAllMotion,
+  initialOrbitAngle,
+  orbitInclinationRad = 0,
+  orbitAscendingNodeRad = 0
+}) {
   const pivot = useRef()
   const meshRef = useRef()
   const moonTexture = useTexture(moon.texture)
 
   useEffect(() => {
-    moonTexture.anisotropy = 8
-    moonTexture.wrapS = THREE.RepeatWrapping
-    moonTexture.wrapT = THREE.ClampToEdgeWrapping
-    moonTexture.minFilter = THREE.LinearMipmapLinearFilter
-    moonTexture.magFilter = THREE.LinearFilter
-    moonTexture.colorSpace = THREE.SRGBColorSpace
-    moonTexture.needsUpdate = true
+    configureTexture(moonTexture)
   }, [moonTexture])
+
+  useEffect(() => {
+    if (!pivot.current || !Number.isFinite(initialOrbitAngle)) return
+    pivot.current.rotation.y = initialOrbitAngle
+  }, [initialOrbitAngle])
 
   useFrame((_, delta) => {
     if (!pivot.current || !meshRef.current) return
@@ -403,29 +722,31 @@ function Moon({ moon, parentName, speedScale, registerBodyRef, onSelectTarget, f
   })
 
   return (
-    <group ref={pivot}>
-      <mesh
-        ref={(ref) => {
-          meshRef.current = ref
-          registerBodyRef(`${parentName}/${moon.name}`, ref, moon.radius)
-        }}
-        position={[moon.distance, 0, 0]}
-        castShadow
-        onClick={(event) => {
-          event.stopPropagation()
-          onSelectTarget(parentName, moon.name)
-        }}
-      >
-        <sphereGeometry args={[moon.radius, 24, 24]} />
-        <meshStandardMaterial
-          map={moonTexture}
-          roughness={0.95}
-          metalness={0.05}
-          emissive={new THREE.Color('#111827')}
-          emissiveMap={moonTexture}
-          emissiveIntensity={0.14}
-        />
-      </mesh>
+    <group ref={pivot} rotation={[0, orbitAscendingNodeRad, 0]}>
+      <group rotation={[0, 0, orbitInclinationRad]}>
+        <mesh
+          ref={(ref) => {
+            meshRef.current = ref
+            registerBodyRef(`${parentName}/${moon.name}`, ref, moon.radius)
+          }}
+          position={[moon.distance, 0, 0]}
+          castShadow
+          onClick={(event) => {
+            event.stopPropagation()
+            onSelectTarget(parentName, moon.name)
+          }}
+        >
+          <sphereGeometry args={[moon.radius, 24, 24]} />
+          <meshStandardMaterial
+            map={moonTexture}
+            roughness={0.95}
+            metalness={0.05}
+            emissive={new THREE.Color('#111827')}
+            emissiveMap={moonTexture}
+            emissiveIntensity={0.14}
+          />
+        </mesh>
+      </group>
     </group>
   )
 }
@@ -491,6 +812,7 @@ function Planet({
   data,
   speedScale,
   initialOrbitAngle,
+  initialSpinAngle,
   selectedName,
   setSelectedName,
   setSelectedMoonKey,
@@ -498,7 +820,8 @@ function Planet({
   showOrbitLines,
   freezeSolarOrbits,
   freezeAllMotion,
-  onSelectMoonTarget
+  onSelectMoonTarget,
+  moonStartupAngles
 }) {
   const orbitRef = useRef()
   const planetRef = useRef()
@@ -515,25 +838,20 @@ function Planet({
   const ringTex = data.ringTexture ? ringTexCandidate : null
   const isUranus = data.name === 'Uranus'
   const axialTiltRad = THREE.MathUtils.degToRad(data.axialTiltDeg ?? 0)
-  const moonPlaneTiltRad = data.name === 'Uranus' || data.name === 'Pluto' ? 0 : axialTiltRad
 
   useEffect(() => {
-    textures.forEach((texture) => {
-      if (!texture) return
-      texture.anisotropy = 8
-      texture.wrapS = THREE.RepeatWrapping
-      texture.wrapT = THREE.ClampToEdgeWrapping
-      texture.minFilter = THREE.LinearMipmapLinearFilter
-      texture.magFilter = THREE.LinearFilter
-      texture.colorSpace = THREE.SRGBColorSpace
-      texture.needsUpdate = true
-    })
+    textures.forEach((texture) => configureTexture(texture))
   }, [textures])
 
   useEffect(() => {
     if (!orbitRef.current || !Number.isFinite(initialOrbitAngle)) return
     orbitRef.current.rotation.y = initialOrbitAngle
   }, [initialOrbitAngle])
+
+  useEffect(() => {
+    if (!planetRef.current || !Number.isFinite(initialSpinAngle)) return
+    planetRef.current.rotation.y = initialSpinAngle
+  }, [initialSpinAngle])
 
   useFrame((_, delta) => {
     if (!orbitRef.current || !planetRef.current) return
@@ -588,19 +906,20 @@ function Planet({
           ) : null}
         </group>
 
-        <group rotation={[0, 0, moonPlaneTiltRad]}>
-          {data.moons.map((moon) => (
-            <Moon
-              key={`${data.name}-${moon.name}`}
-              moon={moon}
-              parentName={data.name}
-              speedScale={speedScale}
-              registerBodyRef={registerBodyRef}
-              onSelectTarget={onSelectMoonTarget}
-              freezeAllMotion={freezeAllMotion}
-            />
-          ))}
-        </group>
+        {data.moons.map((moon) => (
+          <Moon
+            key={`${data.name}-${moon.name}`}
+            moon={moon}
+            parentName={data.name}
+            speedScale={speedScale}
+            registerBodyRef={registerBodyRef}
+            onSelectTarget={onSelectMoonTarget}
+            freezeAllMotion={freezeAllMotion}
+            initialOrbitAngle={moonStartupAngles?.[`${data.name}/${moon.name}`]?.angle ?? moonStartupAngles?.[`${data.name}/${moon.name}`]}
+            orbitInclinationRad={moonStartupAngles?.[`${data.name}/${moon.name}`]?.inclinationRad ?? 0}
+            orbitAscendingNodeRad={moonStartupAngles?.[`${data.name}/${moon.name}`]?.ascendingNodeRad ?? 0}
+          />
+        ))}
       </group>
 
       {showOrbitLines ? <OrbitRing radius={data.distance} color={selectedName === data.name ? '#7babff' : '#2e4e7a'} /> : null}
@@ -608,12 +927,13 @@ function Planet({
   )
 }
 
-function CameraPilot({ mode, selectedTargetKey, followSelected, freezeAllMotion, bodyRefs, controlsRef, onSettled, onReleaseFollow }) {
+function CameraPilot({ mode, selectedTargetKey, followSelected, freezeAllMotion, bodyRefs, controlsRef, onSettled, onReleaseFollow, homeCamera, lockPlanetFocus }) {
   const target = useMemo(() => new THREE.Vector3(), [])
   const nextPos = useMemo(() => new THREE.Vector3(), [])
   const parentPos = useMemo(() => new THREE.Vector3(), [])
   const moonOutward = useMemo(() => new THREE.Vector3(), [])
   const moonSide = useMemo(() => new THREE.Vector3(), [])
+  const worldUp = useMemo(() => new THREE.Vector3(0, 1, 0), [])
   const settledRef = useRef(false)
   const releasedRef = useRef(false)
 
@@ -637,6 +957,9 @@ function CameraPilot({ mode, selectedTargetKey, followSelected, freezeAllMotion,
 
       const releaseDistance = Math.max(hit.radius * FOLLOW_RELEASE_DISTANCE_MULTIPLIER, FOLLOW_RELEASE_MIN_DISTANCE)
       const currentDistance = state.camera.position.distanceTo(target)
+      const isMoonTarget = Boolean(selectedTargetKey?.includes('/'))
+      const shouldLockCurrentPlanet = lockPlanetFocus && !isMoonTarget && selectedTargetKey !== 'Sun'
+      if (shouldLockCurrentPlanet) return
       if (!releasedRef.current && currentDistance > releaseDistance) {
         releasedRef.current = true
         onReleaseFollow()
@@ -646,7 +969,7 @@ function CameraPilot({ mode, selectedTargetKey, followSelected, freezeAllMotion,
 
     if (mode === 'home') {
       target.set(0, 0, 0)
-      nextPos.set(0, 60, 260)
+      nextPos.set(homeCamera[0], homeCamera[1], homeCamera[2])
     } else {
       const hit = selectedTargetKey ? bodyRefs.current[selectedTargetKey] : null
       if (!hit) return
@@ -664,7 +987,7 @@ function CameraPilot({ mode, selectedTargetKey, followSelected, freezeAllMotion,
           moonOutward.normalize()
 
           const desiredDistance = freezeAllMotion ? Math.max(hit.radius * 4.2, 1.1) : Math.max(hit.radius * 5.2, 1.4)
-          moonSide.crossVectors(moonOutward, new THREE.Vector3(0, 1, 0))
+          moonSide.crossVectors(moonOutward, worldUp)
           if (moonSide.lengthSq() < 1e-6) moonSide.set(1, 0, 0)
           moonSide.normalize()
           nextPos.copy(target).addScaledVector(moonOutward, desiredDistance)
@@ -705,21 +1028,16 @@ function CameraPilot({ mode, selectedTargetKey, followSelected, freezeAllMotion,
   return null
 }
 
-function Sun({ onSelect, registerBodyRef }) {
+function Sun({ sunData, onSelect, registerBodyRef, showFarBeacon = false }) {
   const sunGroupRef = useRef()
   const coreRef = useRef()
   const glowNearRef = useRef()
   const glowFarRef = useRef()
-  const sunTexture = useTexture(bodies.sun.texture)
+  const sunTexture = useTexture(sunData.texture)
+  const farBeacon = useMemo(() => new Float32Array([0, 0, 0]), [])
 
   useEffect(() => {
-    sunTexture.anisotropy = 8
-    sunTexture.wrapS = THREE.RepeatWrapping
-    sunTexture.wrapT = THREE.ClampToEdgeWrapping
-    sunTexture.minFilter = THREE.LinearMipmapLinearFilter
-    sunTexture.magFilter = THREE.LinearFilter
-    sunTexture.colorSpace = THREE.SRGBColorSpace
-    sunTexture.needsUpdate = true
+    configureTexture(sunTexture)
   }, [sunTexture])
 
   useFrame((state, delta) => {
@@ -737,32 +1055,55 @@ function Sun({ onSelect, registerBodyRef }) {
       <mesh
         ref={(ref) => {
           coreRef.current = ref
-          registerBodyRef('Sun', ref, bodies.sun.radius)
+          registerBodyRef('Sun', ref, sunData.radius)
         }}
         onClick={(e) => {
           e.stopPropagation()
           onSelect('Sun')
         }}
       >
-        <sphereGeometry args={[bodies.sun.radius, 64, 64]} />
+        <sphereGeometry args={[sunData.radius, 64, 64]} />
         <meshStandardMaterial map={sunTexture} emissive={new THREE.Color('#ff6b1f')} emissiveMap={sunTexture} emissiveIntensity={2.9} />
       </mesh>
 
       <mesh ref={glowNearRef}>
-        <sphereGeometry args={[bodies.sun.radius * 1.1, 48, 48]} />
+        <sphereGeometry args={[sunData.radius * 1.1, 48, 48]} />
         <meshBasicMaterial color="#ff8c37" transparent opacity={0.25} blending={THREE.AdditiveBlending} depthWrite={false} />
       </mesh>
 
       <mesh ref={glowFarRef}>
-        <sphereGeometry args={[bodies.sun.radius * 1.28, 48, 48]} />
+        <sphereGeometry args={[sunData.radius * 1.28, 48, 48]} />
         <meshBasicMaterial color="#ff4a1b" transparent opacity={0.15} blending={THREE.AdditiveBlending} depthWrite={false} />
       </mesh>
+
+      {showFarBeacon ? (
+        <points>
+          <bufferGeometry>
+            <bufferAttribute attach="attributes-position" count={1} array={farBeacon} itemSize={3} />
+          </bufferGeometry>
+          <pointsMaterial
+            color="#ffd48a"
+            size={8}
+            sizeAttenuation={false}
+            transparent
+            opacity={0.85}
+            depthWrite={false}
+            blending={THREE.AdditiveBlending}
+          />
+        </points>
+      ) : null}
     </group>
   )
 }
 
 function Scene({
+  systemBodies,
+  systemOrbitalBands,
+  sceneConfig,
   startupOrbitAngles,
+  startupSpinAngles,
+  moonStartupAngles,
+  scientificMode,
   selectedName,
   setSelectedName,
   setSelectedMoonKey,
@@ -776,7 +1117,8 @@ function Scene({
   onSelectMoonTarget,
   setCameraMode,
   showOrbitLines,
-  onEarthTelemetry
+  onEarthTelemetry,
+  lockPlanetFocus
 }) {
   const bodyRefs = useRef({})
   const controlsRef = useRef()
@@ -790,6 +1132,9 @@ function Scene({
   }
 
   const earthPos = useMemo(() => new THREE.Vector3(), [])
+  const controlsMaxDistance = scientificMode
+    ? (selectedTargetKey === 'Sun' ? sceneConfig.controlsMaxDistanceSun : sceneConfig.controlsMaxDistancePlanet)
+    : sceneConfig.controlsMaxDistance
 
   useFrame((state, delta) => {
     const earth = bodyRefs.current.Earth
@@ -813,18 +1158,54 @@ function Scene({
     <>
       <ambientLight intensity={0.5} />
       <hemisphereLight args={['#8fb5ff', '#1b1f2b', 0.22]} />
-      <CameraLockedStarShell />
-      <DeepSpaceField />
-      <Stars radius={28000} depth={16000} count={18000} factor={6.5} saturation={0} fade speed={0.15} />
+      <CameraLockedStarShell
+        radius={sceneConfig.starShellRadius}
+        count={sceneConfig.starShellCount}
+        color={sceneConfig.starShellColor}
+        opacity={sceneConfig.starShellOpacity}
+        size={sceneConfig.starShellSize}
+      />
+      <CameraLockedGalacticBand
+        radius={sceneConfig.starShellRadius}
+        count={Math.floor(sceneConfig.starShellCount * 0.75)}
+        thickness={sceneConfig.galacticBandThickness}
+        color={sceneConfig.galacticBandColor}
+        opacity={sceneConfig.galacticBandOpacity}
+      />
+      {sceneConfig.nebulaOpacity > 0 ? (
+        <CameraLockedNebula
+          radius={sceneConfig.starShellRadius}
+          count={Math.floor(sceneConfig.starShellCount * 0.7)}
+          opacity={sceneConfig.nebulaOpacity}
+        />
+      ) : null}
+      <DeepSpaceField
+        radius={sceneConfig.deepSpaceRadius}
+        spread={sceneConfig.deepSpaceSpread}
+        count={sceneConfig.deepSpaceCount}
+        color={sceneConfig.deepSpaceColor}
+        opacity={sceneConfig.deepSpaceOpacity}
+        size={sceneConfig.deepSpaceSize}
+      />
+      <Stars
+        radius={sceneConfig.starsRadius}
+        depth={sceneConfig.starsDepth}
+        count={sceneConfig.starsCount}
+        factor={sceneConfig.starsFactor}
+        saturation={0}
+        fade
+        speed={sceneConfig.starsSpeed}
+      />
 
-      <Sun onSelect={setSelectedName} registerBodyRef={registerBodyRef} />
+      <Sun sunData={systemBodies.sun} onSelect={setSelectedName} registerBodyRef={registerBodyRef} showFarBeacon={scientificMode} />
 
-      {bodies.planets.map((planet) => (
+      {systemBodies.planets.map((planet) => (
         <Planet
           key={planet.name}
           data={planet}
           speedScale={speedScale}
           initialOrbitAngle={startupOrbitAngles?.[planet.name]}
+          initialSpinAngle={startupSpinAngles?.[planet.name]}
           selectedName={selectedName}
           setSelectedName={setSelectedName}
           setSelectedMoonKey={setSelectedMoonKey}
@@ -833,35 +1214,36 @@ function Scene({
           freezeSolarOrbits={freezeSolarOrbits}
           freezeAllMotion={freezeAllMotion}
           onSelectMoonTarget={onSelectMoonTarget}
+          moonStartupAngles={moonStartupAngles}
         />
       ))}
 
       <group ref={asteroidRef} rotation={[0.05, 0, 0]}>
         <Belt
-          count={5800}
-          innerRadius={orbitalBands.asteroidBelt.inner}
-          outerRadius={orbitalBands.asteroidBelt.outer}
-          thickness={3.6}
+          count={sceneConfig.asteroidCount}
+          innerRadius={systemOrbitalBands.asteroidBelt.inner}
+          outerRadius={systemOrbitalBands.asteroidBelt.outer}
+          thickness={sceneConfig.asteroidThickness}
           color="#b1b1b1"
           opacity={0.72}
-          size={0.36}
+          size={sceneConfig.asteroidSize}
         />
       </group>
 
       <group ref={kuiperRef} rotation={[0.08, 0.18, 0]}>
         <Belt
-          count={8000}
-          innerRadius={orbitalBands.kuiperBelt.inner}
-          outerRadius={orbitalBands.kuiperBelt.outer}
-          thickness={24}
+          count={sceneConfig.kuiperCount}
+          innerRadius={systemOrbitalBands.kuiperBelt.inner}
+          outerRadius={systemOrbitalBands.kuiperBelt.outer}
+          thickness={sceneConfig.kuiperThickness}
           color="#95afcf"
           opacity={0.34}
-          size={0.46}
+          size={sceneConfig.kuiperSize}
         />
       </group>
 
       <group ref={oortRef} rotation={[0.2, 0.4, 0.1]}>
-        <OortCloud />
+        <OortCloud radius={sceneConfig.oortRadius} spread={sceneConfig.oortSpread} count={sceneConfig.oortCount} />
       </group>
 
       <CameraPilot
@@ -873,6 +1255,8 @@ function Scene({
         controlsRef={controlsRef}
         onSettled={() => setCameraMode(null)}
         onReleaseFollow={onReleaseFollow}
+        homeCamera={sceneConfig.homeCamera}
+        lockPlanetFocus={lockPlanetFocus}
       />
 
       <OrbitControls
@@ -880,7 +1264,7 @@ function Scene({
         enableDamping
         dampingFactor={0.06}
         minDistance={freezeAllMotion ? 0.25 : 0.7}
-        maxDistance={34000}
+        maxDistance={controlsMaxDistance}
         rotateSpeed={0.65}
         zoomSpeed={0.92}
         panSpeed={0.6}
@@ -890,10 +1274,30 @@ function Scene({
 }
 
 export default function App() {
-  const startupOrbitAngles = useMemo(() => getStartupOrbitAngles(), [])
+  const [experienceMode, setExperienceMode] = useState('fun')
+  const scientificMode = experienceMode === 'scientific'
+  const activeBaseBodies = scientificMode ? scientificBodies : bodies
+  const activeOrbitalBands = scientificMode ? scientificOrbitalBands : orbitalBands
+  const activeSceneConfig = scientificMode ? SCIENTIFIC_SCENE_CONFIG : FUN_SCENE_CONFIG
+  const activeBodies = activeBaseBodies
+
+  const startupOrbitAngles = useMemo(
+    () => getStartupOrbitAngles(activeBodies.planets),
+    [activeBodies]
+  )
+  const startupSpinAngles = useMemo(() => getStartupSpinAngles(activeBodies.planets), [activeBodies])
+  const moonStartupAngles = useMemo(
+    () => (scientificMode
+      ? getScientificMoonOrbitState(activeBodies.planets)
+      : getStartupMoonOrbitAngles(activeBodies.planets)),
+    [activeBodies, scientificMode]
+  )
+  const earthPlanet = activeBodies.planets.find((planet) => planet.name === 'Earth')
+  const earthStartDistance = earthPlanet?.distance ?? EARTH_FALLBACK_DISTANCE
+  const earthStartRadius = earthPlanet?.radius ?? EARTH_FALLBACK_RADIUS
   const earthStartupAngle = startupOrbitAngles.Earth ?? 0
-  const earthStartX = Math.cos(earthStartupAngle) * EARTH_START_DISTANCE
-  const earthStartZ = Math.sin(earthStartupAngle) * EARTH_START_DISTANCE
+  const earthStartX = Math.cos(earthStartupAngle) * earthStartDistance
+  const earthStartZ = Math.sin(earthStartupAngle) * earthStartDistance
   const [selectedName, setSelectedName] = useState('Earth')
   const [selectedMoonKey, setSelectedMoonKey] = useState(null)
   const [speedScale, setSpeedScale] = useState(MIN_SPEED)
@@ -905,20 +1309,22 @@ export default function App() {
   const [mapCenter, setMapCenter] = useState({ lat: 0, lng: 0 })
   const [mapRange, setMapRange] = useState(MAP_DEFAULT_RANGE)
   const mapTransitionLockRef = useRef(false)
+  const focusReleaseBlockUntilMsRef = useRef(0)
   const mapScrollIntentRef = useRef('none')
-  const mapPrevRangeRef = useRef(MAP_DEFAULT_RANGE)
   const mapLastExitMsRef = useRef(0)
   const mapEnteredAtMsRef = useRef(0)
   const mapLastWheelMsRef = useRef(0)
+  const mapEarthVecRef = useRef(new THREE.Vector3())
+  const mapCameraVecRef = useRef(new THREE.Vector3())
 
   const selectedTargetKey = selectedMoonKey || selectedName
-  const freezeSolarOrbits = followSelected
+  const freezeSolarOrbits = scientificMode || followSelected
   const freezeAllMotion = followSelected && Boolean(selectedMoonKey)
 
   const selected = useMemo(() => {
     if (selectedMoonKey) {
       const [planetName, moonName] = selectedMoonKey.split('/')
-      const planet = bodies.planets.find((p) => p.name === planetName)
+      const planet = activeBodies.planets.find((p) => p.name === planetName)
       const moon = planet?.moons.find((m) => m.name === moonName)
       if (moon) {
         return {
@@ -932,9 +1338,9 @@ export default function App() {
         }
       }
     }
-    if (selectedName === 'Sun') return bodies.sun
-    return bodies.planets.find((planet) => planet.name === selectedName) ?? null
-  }, [selectedMoonKey, selectedName])
+    if (selectedName === 'Sun') return activeBodies.sun
+    return activeBodies.planets.find((planet) => planet.name === selectedName) ?? null
+  }, [activeBodies, selectedMoonKey, selectedName])
 
   const jumpTo = (name) => {
     setSelectedMoonKey(null)
@@ -952,6 +1358,10 @@ export default function App() {
   }
 
   const goHome = () => {
+    if (scientificMode) {
+      jumpTo('Earth')
+      return
+    }
     setSelectedMoonKey(null)
     setSelectedName(null)
     setCameraMode('home')
@@ -985,6 +1395,7 @@ export default function App() {
   const onEarthTelemetry = useCallback(
     ({ distance, earthRadius, earthPosition, cameraPosition }) => {
       if (viewMode !== 'space') return
+      if (cameraMode !== null) return
       if (selectedTargetKey !== 'Earth' || selectedMoonKey) return
 
       const surfaceDistance = distance - earthRadius
@@ -996,14 +1407,13 @@ export default function App() {
       if (surfaceDistance > MAP_ENTER_SURFACE_BUFFER || mapTransitionLockRef.current) return
 
       mapTransitionLockRef.current = true
-      const earthVec = new THREE.Vector3(earthPosition.x, earthPosition.y, earthPosition.z)
-      const cameraVec = new THREE.Vector3(cameraPosition.x, cameraPosition.y, cameraPosition.z)
+      const earthVec = mapEarthVecRef.current.set(earthPosition.x, earthPosition.y, earthPosition.z)
+      const cameraVec = mapCameraVecRef.current.set(cameraPosition.x, cameraPosition.y, cameraPosition.z)
       const lookDirection = cameraVec.sub(earthVec)
       const nextCenter = worldDirectionToLatLng(lookDirection)
 
       setMapCenter(nextCenter)
       setMapRange(MAP_DEFAULT_RANGE)
-      mapPrevRangeRef.current = MAP_DEFAULT_RANGE
       mapLastExitMsRef.current = 0
       mapEnteredAtMsRef.current = Date.now()
       mapLastWheelMsRef.current = 0
@@ -1012,8 +1422,43 @@ export default function App() {
       setFollowSelected(false)
       setCameraMode(null)
     },
-    [selectedMoonKey, selectedTargetKey, viewMode]
+    [cameraMode, selectedMoonKey, selectedTargetKey, viewMode]
   )
+
+  useEffect(() => {
+    setViewMode('space')
+    mapTransitionLockRef.current = true
+    focusReleaseBlockUntilMsRef.current = Date.now() + 2400
+    mapScrollIntentRef.current = 'none'
+    mapLastExitMsRef.current = 0
+    mapEnteredAtMsRef.current = 0
+    mapLastWheelMsRef.current = 0
+    setMapRange(MAP_DEFAULT_RANGE)
+    setSelectedMoonKey(null)
+    setSelectedName('Earth')
+    setFollowSelected(true)
+    setCameraMode('focus')
+  }, [experienceMode])
+
+  useEffect(() => {
+    if (viewMode !== 'space') return undefined
+
+    const readyForAutoMap =
+      cameraMode === null &&
+      selectedTargetKey === 'Earth' &&
+      !selectedMoonKey
+
+    if (!readyForAutoMap) {
+      mapTransitionLockRef.current = true
+      return undefined
+    }
+
+    const releaseId = window.setTimeout(() => {
+      mapTransitionLockRef.current = false
+    }, 850)
+
+    return () => window.clearTimeout(releaseId)
+  }, [cameraMode, selectedMoonKey, selectedTargetKey, viewMode])
 
   return (
     <div className={`app-shell ${sidebarOpen ? 'sidebar-open' : 'sidebar-collapsed'}`}>
@@ -1056,6 +1501,28 @@ export default function App() {
                 <p>Navigate planets and moons, then transition between deep-space and Earth map mode.</p>
               </div>
 
+              <div className="mode-switch" role="group" aria-label="Experience mode">
+                <p className="mode-switch-label">Experience Mode</p>
+                <div className="mode-switch-buttons">
+                  <button
+                    type="button"
+                    className={`mode-switch-button ${experienceMode === 'fun' ? 'active' : ''}`}
+                    aria-pressed={experienceMode === 'fun'}
+                    onClick={() => setExperienceMode('fun')}
+                  >
+                    Fun Mode
+                  </button>
+                  <button
+                    type="button"
+                    className={`mode-switch-button ${experienceMode === 'scientific' ? 'active' : ''}`}
+                    aria-pressed={experienceMode === 'scientific'}
+                    onClick={() => setExperienceMode('scientific')}
+                  >
+                    Scientific Mode
+                  </button>
+                </div>
+              </div>
+
               <label htmlFor="speed">Simulation Speed: {speedScale.toFixed(1)}x</label>
               <input
                 id="speed"
@@ -1083,7 +1550,7 @@ export default function App() {
               >
                 <option value="">None (Free View)</option>
                 <option value="Sun">Sun</option>
-                {bodies.planets.map((planet) => (
+                {activeBodies.planets.map((planet) => (
                   <option key={planet.name} value={planet.name}>
                     {planet.name}
                   </option>
@@ -1108,7 +1575,7 @@ export default function App() {
                     }}
                   >
                     <option value="">Planet Center</option>
-                    {bodies.planets
+                    {activeBodies.planets
                       .find((planet) => planet.name === selectedName)
                       ?.moons.map((moon) => {
                         const moonKey = `${selectedName}/${moon.name}`
@@ -1150,24 +1617,30 @@ export default function App() {
       <div className={`space-stage ${viewMode === 'map' ? 'inactive' : ''}`}>
         <Canvas
           camera={{
-            position: [earthStartX + EARTH_START_RADIUS * 2, EARTH_START_RADIUS * 0.76, earthStartZ + EARTH_START_RADIUS * 2],
+            position: [earthStartX + earthStartRadius * 2, earthStartRadius * 0.76, earthStartZ + earthStartRadius * 2],
             fov: 52,
             near: 0.1,
-            far: 70000
+            far: activeSceneConfig.canvasFar
           }}
           shadows
           frameloop={viewMode === 'map' ? 'demand' : 'always'}
           onPointerMissed={() => {
-            if (cameraMode === null) {
+            if (cameraMode === null && !scientificMode) {
               setSelectedMoonKey(null)
               setSelectedName(null)
               setFollowSelected(false)
             }
           }}
         >
-          <color attach="background" args={['#02040a']} />
+          <color attach="background" args={[activeSceneConfig.backgroundColor]} />
           <Scene
+            systemBodies={activeBodies}
+            systemOrbitalBands={activeOrbitalBands}
+            sceneConfig={activeSceneConfig}
             startupOrbitAngles={startupOrbitAngles}
+            startupSpinAngles={startupSpinAngles}
+            moonStartupAngles={moonStartupAngles}
+            scientificMode={scientificMode}
             selectedName={selectedName}
             setSelectedName={jumpTo}
             setSelectedMoonKey={setSelectedMoonKey}
@@ -1177,11 +1650,15 @@ export default function App() {
             followSelected={followSelected}
             freezeSolarOrbits={freezeSolarOrbits}
             freezeAllMotion={freezeAllMotion}
-            onReleaseFollow={() => setFollowSelected(false)}
+            onReleaseFollow={() => {
+              if (Date.now() < focusReleaseBlockUntilMsRef.current) return
+              setFollowSelected(false)
+            }}
             onSelectMoonTarget={(planetName, moonName) => jumpToMoon(`${planetName}/${moonName}`)}
             setCameraMode={setCameraMode}
             showOrbitLines={showOrbitLines}
             onEarthTelemetry={onEarthTelemetry}
+            lockPlanetFocus={scientificMode}
           />
         </Canvas>
       </div>
@@ -1195,7 +1672,6 @@ export default function App() {
               return
             }
 
-            mapPrevRangeRef.current = range
             setMapRange(range)
 
             const intendedZoomOut = mapScrollIntentRef.current === 'out'
