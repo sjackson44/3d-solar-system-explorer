@@ -68,7 +68,7 @@ npm run preview
 ## Project Structure
 
 - `src/` - React + Three.js app code
-- `solar-system-skins/` - texture assets used by the simulation
+- `public/solar-system-skins/` - texture assets used by the simulation
 - `screenshots/` - local screenshots (ignored by git)
 
 ## License
