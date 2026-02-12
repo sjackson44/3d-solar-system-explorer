@@ -1,7 +1,8 @@
 export const DISTANCE_SCALE = 36
 export const DISTANCE_OFFSET = 28
+export const SYSTEM_DISTANCE_MULTIPLIER = 1.82
 
-export const scaleDistance = (au) => DISTANCE_OFFSET + au * DISTANCE_SCALE
+export const scaleDistance = (au) => (DISTANCE_OFFSET + au * DISTANCE_SCALE) * SYSTEM_DISTANCE_MULTIPLIER
 
 export const orbitalBands = {
   asteroidBelt: {
@@ -18,7 +19,7 @@ export const bodies = {
   sun: {
     name: 'Sun',
     kind: 'star',
-    radius: 10,
+    radius: 9.8,
     texture: '/solar-system-skins/sun.jpg',
     facts: [
       'Contains about 99.8% of our solar system\'s mass.',

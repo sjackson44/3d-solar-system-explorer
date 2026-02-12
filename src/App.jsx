@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls, Stars, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
+import { AstroTime, Body, HelioVector } from 'astronomy-engine'
 import { bodies, orbitalBands } from './data'
 
 const ORBIT_SPEED = 0.2
@@ -17,6 +18,49 @@ const MAP_EXIT_ARM_DELAY_MS = 1200
 const MAP_EXIT_WHEEL_RECENCY_MS = 450
 const FOLLOW_RELEASE_DISTANCE_MULTIPLIER = 10
 const FOLLOW_RELEASE_MIN_DISTANCE = 18
+const EARTH_PLANET = bodies.planets.find((planet) => planet.name === 'Earth')
+const EARTH_START_DISTANCE = EARTH_PLANET?.distance ?? 50
+const EARTH_START_RADIUS = EARTH_PLANET?.radius ?? 1
+const PLANET_TO_BODY = {
+  Mercury: Body.Mercury,
+  Venus: Body.Venus,
+  Earth: Body.Earth,
+  Mars: Body.Mars,
+  Jupiter: Body.Jupiter,
+  Saturn: Body.Saturn,
+  Uranus: Body.Uranus,
+  Neptune: Body.Neptune,
+  Pluto: Body.Pluto
+}
+
+function getStartupOrbitAngles() {
+  try {
+    const time = new AstroTime(new Date())
+    const nextAngles = {}
+
+    bodies.planets.forEach((planet) => {
+      const astroBody = PLANET_TO_BODY[planet.name]
+      if (!astroBody) {
+        nextAngles[planet.name] = Math.random() * Math.PI * 2
+        return
+      }
+      const helio = HelioVector(astroBody, time)
+      if (!Number.isFinite(helio.x) || !Number.isFinite(helio.y)) {
+        nextAngles[planet.name] = Math.random() * Math.PI * 2
+        return
+      }
+      nextAngles[planet.name] = Math.atan2(helio.y, helio.x)
+    })
+
+    return nextAngles
+  } catch {
+    const fallbackAngles = {}
+    bodies.planets.forEach((planet) => {
+      fallbackAngles[planet.name] = Math.random() * Math.PI * 2
+    })
+    return fallbackAngles
+  }
+}
 
 let googleMapsScriptPromise = null
 
@@ -87,7 +131,6 @@ function GoogleMapsPanel({ center, range, onRangeChange, onBackToSpace }) {
   const mapNodeRef = useRef(null)
   const rangeHandlerRef = useRef(null)
   const fallbackRangeRef = useRef(null)
-  const currentRangeRef = useRef(range)
   const [status, setStatus] = useState('loading')
   const [errorMessage, setErrorMessage] = useState('')
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY
@@ -112,7 +155,6 @@ function GoogleMapsPanel({ center, range, onRangeChange, onBackToSpace }) {
         rangeHandlerRef.current = () => {
           const currentRange = map3dRef.current?.range
           if (typeof currentRange === 'number') {
-            currentRangeRef.current = currentRange
             onRangeChange(currentRange)
           }
         }
@@ -145,7 +187,6 @@ function GoogleMapsPanel({ center, range, onRangeChange, onBackToSpace }) {
   useEffect(() => {
     if (!map3dRef.current || typeof range !== 'number') return
     map3dRef.current.range = range
-    currentRangeRef.current = range
   }, [range])
 
   useEffect(() => {
@@ -356,7 +397,9 @@ function Moon({ moon, parentName, speedScale, registerBodyRef, onSelectTarget, f
     const orbit = freezeAllMotion ? 0 : (1 / Math.max(Math.abs(moon.orbitPeriod), 0.02)) * MOON_ORBIT_BASE * speedScale
     const direction = moon.orbitPeriod < 0 ? -1 : 1
     pivot.current.rotation.y += delta * orbit * direction
-    meshRef.current.rotation.y += delta * SPIN_SPEED * speedScale
+    // Most major moons are tidally locked, which reads more naturally here.
+    const moonSpin = moon.tidallyLocked === false ? SPIN_SPEED * speedScale : 0
+    meshRef.current.rotation.y += delta * moonSpin
   })
 
   return (
@@ -447,6 +490,7 @@ function EarthMaterial({ dayMap, nightMap }) {
 function Planet({
   data,
   speedScale,
+  initialOrbitAngle,
   selectedName,
   setSelectedName,
   setSelectedMoonKey,
@@ -485,6 +529,11 @@ function Planet({
       texture.needsUpdate = true
     })
   }, [textures])
+
+  useEffect(() => {
+    if (!orbitRef.current || !Number.isFinite(initialOrbitAngle)) return
+    orbitRef.current.rotation.y = initialOrbitAngle
+  }, [initialOrbitAngle])
 
   useFrame((_, delta) => {
     if (!orbitRef.current || !planetRef.current) return
@@ -713,6 +762,7 @@ function Sun({ onSelect, registerBodyRef }) {
 }
 
 function Scene({
+  startupOrbitAngles,
   selectedName,
   setSelectedName,
   setSelectedMoonKey,
@@ -774,6 +824,7 @@ function Scene({
           key={planet.name}
           data={planet}
           speedScale={speedScale}
+          initialOrbitAngle={startupOrbitAngles?.[planet.name]}
           selectedName={selectedName}
           setSelectedName={setSelectedName}
           setSelectedMoonKey={setSelectedMoonKey}
@@ -787,7 +838,7 @@ function Scene({
 
       <group ref={asteroidRef} rotation={[0.05, 0, 0]}>
         <Belt
-          count={3000}
+          count={5800}
           innerRadius={orbitalBands.asteroidBelt.inner}
           outerRadius={orbitalBands.asteroidBelt.outer}
           thickness={3.6}
@@ -799,7 +850,7 @@ function Scene({
 
       <group ref={kuiperRef} rotation={[0.08, 0.18, 0]}>
         <Belt
-          count={4100}
+          count={8000}
           innerRadius={orbitalBands.kuiperBelt.inner}
           outerRadius={orbitalBands.kuiperBelt.outer}
           thickness={24}
@@ -839,12 +890,16 @@ function Scene({
 }
 
 export default function App() {
-  const [selectedName, setSelectedName] = useState(null)
+  const startupOrbitAngles = useMemo(() => getStartupOrbitAngles(), [])
+  const earthStartupAngle = startupOrbitAngles.Earth ?? 0
+  const earthStartX = Math.cos(earthStartupAngle) * EARTH_START_DISTANCE
+  const earthStartZ = Math.sin(earthStartupAngle) * EARTH_START_DISTANCE
+  const [selectedName, setSelectedName] = useState('Earth')
   const [selectedMoonKey, setSelectedMoonKey] = useState(null)
   const [speedScale, setSpeedScale] = useState(MIN_SPEED)
-  const [cameraMode, setCameraMode] = useState('home')
-  const [followSelected, setFollowSelected] = useState(false)
-  const [panelOpen, setPanelOpen] = useState(true)
+  const [cameraMode, setCameraMode] = useState('focus')
+  const [followSelected, setFollowSelected] = useState(true)
+  const [sidebarOpen, setSidebarOpen] = useState(true)
   const [showOrbitLines, setShowOrbitLines] = useState(false)
   const [viewMode, setViewMode] = useState('space')
   const [mapCenter, setMapCenter] = useState({ lat: 0, lng: 0 })
@@ -903,7 +958,7 @@ export default function App() {
     setFollowSelected(false)
   }
 
-  const returnToSpaceFromMap = useCallback((source = 'unknown') => {
+  const returnToSpaceFromMap = useCallback(() => {
     mapTransitionLockRef.current = true
     setViewMode('space')
     setSelectedMoonKey(null)
@@ -961,85 +1016,45 @@ export default function App() {
   )
 
   return (
-    <div className="app-shell">
-      <div className={`space-stage ${viewMode === 'map' ? 'inactive' : ''}`}>
-        <Canvas
-          camera={{ position: [0, 60, 260], fov: 52, near: 0.1, far: 70000 }}
-          shadows
-          frameloop={viewMode === 'map' ? 'demand' : 'always'}
-          onPointerMissed={() => {
-            if (cameraMode === null) {
-              setSelectedMoonKey(null)
-              setSelectedName(null)
-              setFollowSelected(false)
-            }
-          }}
-        >
-          <color attach="background" args={['#02040a']} />
-          <Scene
-            selectedName={selectedName}
-            setSelectedName={jumpTo}
-            setSelectedMoonKey={setSelectedMoonKey}
-            speedScale={speedScale}
-            cameraMode={cameraMode}
-            selectedTargetKey={selectedTargetKey}
-            followSelected={followSelected}
-            freezeSolarOrbits={freezeSolarOrbits}
-            freezeAllMotion={freezeAllMotion}
-            onReleaseFollow={() => setFollowSelected(false)}
-            onSelectMoonTarget={(planetName, moonName) => jumpToMoon(`${planetName}/${moonName}`)}
-            setCameraMode={setCameraMode}
-            showOrbitLines={showOrbitLines}
-            onEarthTelemetry={onEarthTelemetry}
-          />
-        </Canvas>
-      </div>
+    <div className={`app-shell ${sidebarOpen ? 'sidebar-open' : 'sidebar-collapsed'}`}>
+      <aside className="side-drawer">
+        {sidebarOpen ? (
+          <div className="sidebar-header">
+            <button
+              type="button"
+              className="sidebar-toggle is-open"
+              onClick={() => setSidebarOpen(false)}
+              aria-expanded
+              aria-label="Close sidebar"
+            >
+              <span className="sidebar-toggle-visual" aria-hidden="true">
+                <span className="sidebar-glyph" />
+              </span>
+              <span className="sidebar-tooltip">← Close sidebar</span>
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="sidebar-toggle is-closed"
+            onClick={() => setSidebarOpen(true)}
+            aria-expanded={false}
+            aria-label="Open sidebar"
+          >
+            <span className="sidebar-toggle-visual" aria-hidden="true">
+              <span className="sidebar-glyph" />
+            </span>
+            <span className="sidebar-tooltip">→ Open sidebar</span>
+          </button>
+        )}
 
-      {viewMode === 'map' ? (
-        <GoogleMapsPanel
-          center={mapCenter}
-          range={mapRange}
-          onRangeChange={(range) => {
-            if (!Number.isFinite(range) || range <= 1000) {
-              return
-            }
-
-            const previousRange = mapPrevRangeRef.current
-            mapPrevRangeRef.current = range
-            setMapRange(range)
-
-            const intendedZoomOut = mapScrollIntentRef.current === 'out'
-            const nowMs = Date.now()
-            const cooldownElapsed = nowMs - mapLastExitMsRef.current > MAP_EXIT_COOLDOWN_MS
-            const armDelayElapsed = nowMs - mapEnteredAtMsRef.current > MAP_EXIT_ARM_DELAY_MS
-            const recentWheel = nowMs - mapLastWheelMsRef.current <= MAP_EXIT_WHEEL_RECENCY_MS
-            const reachedExitRange = range >= MAP_EXIT_MIN_RANGE
-
-            if (intendedZoomOut && reachedExitRange && cooldownElapsed && armDelayElapsed && recentWheel) {
-              mapLastExitMsRef.current = nowMs
-              returnToSpaceFromMap('scroll-range-intent')
-            }
-          }}
-          onBackToSpace={returnToSpaceFromMap}
-        />
-      ) : null}
-
-      <button
-        type="button"
-        className="hamburger-btn"
-        onClick={() => setPanelOpen((prev) => !prev)}
-        aria-expanded={panelOpen}
-        aria-label="Toggle panel"
-      >
-        <span />
-        <span />
-        <span />
-      </button>
-
-      <aside className={`side-drawer ${panelOpen ? 'open' : ''}`}>
-        <div className="hud">
-              <h1>Solar System Explorer</h1>
-              <p>Click planets to focus. Drag to orbit camera, scroll to zoom from close-up views all the way past the Oort Cloud.</p>
+        {sidebarOpen ? (
+          <div className="sidebar-content">
+            <div className="hud">
+              <div className="hud-title">
+                <h1>Solar System Explorer</h1>
+                <p>Navigate planets and moons, then transition between deep-space and Earth map mode.</p>
+              </div>
 
               <label htmlFor="speed">Simulation Speed: {speedScale.toFixed(1)}x</label>
               <input
@@ -1107,31 +1122,98 @@ export default function App() {
                 </>
               ) : null}
 
-          <div className="hud-buttons">
-            <button type="button" onClick={goHome}>
-              Full System View
-            </button>
-            <button type="button" onClick={() => jumpTo('Earth')}>
-              Jump to Earth
-            </button>
-            <button type="button" onClick={() => setShowOrbitLines((prev) => !prev)}>
-              {showOrbitLines ? 'Hide Orbital Lines' : 'Show Orbital Lines'}
-            </button>
-          </div>
-        </div>
+              <div className="hud-buttons">
+                <button type="button" onClick={goHome}>
+                  Full System View
+                </button>
+                <button type="button" onClick={() => setShowOrbitLines((prev) => !prev)}>
+                  {showOrbitLines ? 'Hide Orbital Lines' : 'Show Orbital Lines'}
+                </button>
+              </div>
+            </div>
 
-        {selected ? (
-          <div className="fact-panel">
-            <h2>{selected.name}</h2>
-            <ul>
-              {selected.facts?.map((fact) => (
-                <li key={fact}>{fact}</li>
-              ))}
-            </ul>
-            {selected.moons?.length ? <p>Major moons shown: {selected.moons.map((moon) => moon.name).join(', ')}</p> : null}
+            {selected ? (
+              <div className="fact-panel">
+                <h2>{selected.name}</h2>
+                <ul>
+                  {selected.facts?.map((fact) => (
+                    <li key={fact}>{fact}</li>
+                  ))}
+                </ul>
+                {selected.moons?.length ? <p>Major moons shown: {selected.moons.map((moon) => moon.name).join(', ')}</p> : null}
+              </div>
+            ) : null}
           </div>
         ) : null}
       </aside>
+
+      <div className={`space-stage ${viewMode === 'map' ? 'inactive' : ''}`}>
+        <Canvas
+          camera={{
+            position: [earthStartX + EARTH_START_RADIUS * 2, EARTH_START_RADIUS * 0.76, earthStartZ + EARTH_START_RADIUS * 2],
+            fov: 52,
+            near: 0.1,
+            far: 70000
+          }}
+          shadows
+          frameloop={viewMode === 'map' ? 'demand' : 'always'}
+          onPointerMissed={() => {
+            if (cameraMode === null) {
+              setSelectedMoonKey(null)
+              setSelectedName(null)
+              setFollowSelected(false)
+            }
+          }}
+        >
+          <color attach="background" args={['#02040a']} />
+          <Scene
+            startupOrbitAngles={startupOrbitAngles}
+            selectedName={selectedName}
+            setSelectedName={jumpTo}
+            setSelectedMoonKey={setSelectedMoonKey}
+            speedScale={speedScale}
+            cameraMode={cameraMode}
+            selectedTargetKey={selectedTargetKey}
+            followSelected={followSelected}
+            freezeSolarOrbits={freezeSolarOrbits}
+            freezeAllMotion={freezeAllMotion}
+            onReleaseFollow={() => setFollowSelected(false)}
+            onSelectMoonTarget={(planetName, moonName) => jumpToMoon(`${planetName}/${moonName}`)}
+            setCameraMode={setCameraMode}
+            showOrbitLines={showOrbitLines}
+            onEarthTelemetry={onEarthTelemetry}
+          />
+        </Canvas>
+      </div>
+
+      {viewMode === 'map' ? (
+        <GoogleMapsPanel
+          center={mapCenter}
+          range={mapRange}
+          onRangeChange={(range) => {
+            if (!Number.isFinite(range) || range <= 1000) {
+              return
+            }
+
+            mapPrevRangeRef.current = range
+            setMapRange(range)
+
+            const intendedZoomOut = mapScrollIntentRef.current === 'out'
+            const nowMs = Date.now()
+            const cooldownElapsed = nowMs - mapLastExitMsRef.current > MAP_EXIT_COOLDOWN_MS
+            const armDelayElapsed = nowMs - mapEnteredAtMsRef.current > MAP_EXIT_ARM_DELAY_MS
+            const recentWheel = nowMs - mapLastWheelMsRef.current <= MAP_EXIT_WHEEL_RECENCY_MS
+            const reachedExitRange = range >= MAP_EXIT_MIN_RANGE
+
+            if (intendedZoomOut && reachedExitRange && cooldownElapsed && armDelayElapsed && recentWheel) {
+              mapLastExitMsRef.current = nowMs
+              returnToSpaceFromMap()
+            }
+          }}
+          onBackToSpace={returnToSpaceFromMap}
+        />
+      ) : null}
+
     </div>
   )
 }
