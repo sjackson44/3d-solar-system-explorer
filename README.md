@@ -1,6 +1,10 @@
 # 3D Solar System Explorer
 
-A fun, educational 3D solar system app built to help my kids explore space.
+A fun, educational 3D solar system app built to help my kids explore space, and learn about our solar system. .
+
+## Production
+
+- Live app: https://3d-solar-system-explorer.vercel.app
 
 It includes:
 - The Sun, planets, and selected major moons
