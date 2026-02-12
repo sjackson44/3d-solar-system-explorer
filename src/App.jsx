@@ -23,6 +23,15 @@ const FOLLOW_RELEASE_DISTANCE_MULTIPLIER = 10
 const FOLLOW_RELEASE_MIN_DISTANCE = 18
 const EARTH_FALLBACK_DISTANCE = 50
 const EARTH_FALLBACK_RADIUS = 1
+const FREE_ROAM_KEY_GROUPS = {
+  forward: ['KeyW', 'ArrowUp'],
+  backward: ['KeyS', 'ArrowDown'],
+  left: ['KeyA', 'ArrowLeft'],
+  right: ['KeyD', 'ArrowRight'],
+  up: ['KeyE', 'PageUp', 'Space'],
+  down: ['KeyQ', 'PageDown', 'ControlLeft', 'ControlRight'],
+  turbo: ['ShiftLeft', 'ShiftRight']
+}
 const FUN_SCENE_CONFIG = {
   backgroundColor: '#030617',
   homeCamera: [0, 60, 260],
@@ -1621,6 +1630,573 @@ function CameraPilot({ mode, selectedTargetKey, followSelected, freezeAllMotion,
   return null
 }
 
+function FreeRoamController({
+  enabled = false,
+  keyboardEnabled = true,
+  autoRoamEnabled = false,
+  autoRoamSpeed = 1,
+  scientificMode = false,
+  controlsRef,
+  bodyRefs,
+  orbitalBands,
+  sceneConfig
+}) {
+  const pressedRef = useRef(new Set())
+  const scriptedRef = useRef({
+    forward: 0,
+    right: 0,
+    up: 0,
+    boost: 1,
+    yaw: 0,
+    pitch: 0,
+    untilMs: 0
+  })
+  const autoStateRef = useRef({
+    hasTarget: false,
+    mode: 'travel',
+    holdUntilMs: 0,
+    travelStartedMs: 0,
+    targetType: 'sun',
+    focusKey: 'Sun',
+    arrivalDistance: 20,
+    orbitSpin: 1,
+    orbitStrafe: 0.7,
+    forceInnerNext: false
+  })
+  const forward = useMemo(() => new THREE.Vector3(), [])
+  const right = useMemo(() => new THREE.Vector3(), [])
+  const up = useMemo(() => new THREE.Vector3(), [])
+  const move = useMemo(() => new THREE.Vector3(), [])
+  const step = useMemo(() => new THREE.Vector3(), [])
+  const earthPos = useMemo(() => new THREE.Vector3(), [])
+  const focusPos = useMemo(() => new THREE.Vector3(), [])
+  const waypointPos = useMemo(() => new THREE.Vector3(), [])
+  const targetPos = useMemo(() => new THREE.Vector3(), [])
+  const targetDir = useMemo(() => new THREE.Vector3(), [])
+  const randomDir = useMemo(() => new THREE.Vector3(), [])
+  const desiredDir = useMemo(() => new THREE.Vector3(), [])
+  const radialDir = useMemo(() => new THREE.Vector3(), [])
+  const tangentDir = useMemo(() => new THREE.Vector3(), [])
+  const shipRight = useMemo(() => new THREE.Vector3(), [])
+  const shipUp = useMemo(() => new THREE.Vector3(), [])
+  const worldUp = useMemo(() => new THREE.Vector3(0, 1, 0), [])
+  const axisX = useMemo(() => new THREE.Vector3(1, 0, 0), [])
+  const shipMatrix = useMemo(() => new THREE.Matrix4(), [])
+  const shipQuat = useMemo(() => new THREE.Quaternion(), [])
+  const lookQuat = useMemo(() => new THREE.Quaternion(), [])
+  const lookEuler = useMemo(() => new THREE.Euler(0, 0, 0, 'YXZ'), [])
+  const shipForwardRef = useRef(new THREE.Vector3(0, 0, -1))
+  const lookOffsetRef = useRef({ yaw: 0, pitch: 0 })
+  const lookDragActiveRef = useRef(false)
+  const lookDir = useMemo(() => new THREE.Vector3(), [])
+  const lookBaseDir = useMemo(() => new THREE.Vector3(), [])
+  const viewEuler = useMemo(() => new THREE.Euler(0, 0, 0, 'YXZ'), [])
+  const keySets = useMemo(
+    () => ({
+      forward: new Set(FREE_ROAM_KEY_GROUPS.forward),
+      backward: new Set(FREE_ROAM_KEY_GROUPS.backward),
+      left: new Set(FREE_ROAM_KEY_GROUPS.left),
+      right: new Set(FREE_ROAM_KEY_GROUPS.right),
+      up: new Set(FREE_ROAM_KEY_GROUPS.up),
+      down: new Set(FREE_ROAM_KEY_GROUPS.down),
+      turbo: new Set(FREE_ROAM_KEY_GROUPS.turbo),
+      all: new Set(Object.values(FREE_ROAM_KEY_GROUPS).flat())
+    }),
+    []
+  )
+
+  const applyScriptedInput = useCallback((input = {}) => {
+    const durationMs = Number.isFinite(input.durationMs) ? Math.max(16, input.durationMs) : 16
+    const normalizeAxis = (value) => {
+      if (!Number.isFinite(value)) return 0
+      return THREE.MathUtils.clamp(value, -1, 1)
+    }
+
+    scriptedRef.current = {
+      forward: normalizeAxis(input.forward),
+      right: normalizeAxis(input.right),
+      up: normalizeAxis(input.up),
+      boost: Number.isFinite(input.boost) ? THREE.MathUtils.clamp(input.boost, 0.25, 8) : 1,
+      yaw: Number.isFinite(input.yaw) ? input.yaw : 0,
+      pitch: Number.isFinite(input.pitch) ? input.pitch : 0,
+      untilMs: performance.now() + durationMs
+    }
+  }, [])
+
+  const clearScriptedInput = useCallback(() => {
+    scriptedRef.current.untilMs = 0
+    scriptedRef.current.forward = 0
+    scriptedRef.current.right = 0
+    scriptedRef.current.up = 0
+    scriptedRef.current.boost = 1
+    scriptedRef.current.yaw = 0
+    scriptedRef.current.pitch = 0
+  }, [])
+
+  const randomUnitVector = useCallback(() => {
+    const theta = Math.random() * Math.PI * 2
+    const z = Math.random() * 2 - 1
+    const xy = Math.sqrt(Math.max(0, 1 - z * z))
+    randomDir.set(Math.cos(theta) * xy, z, Math.sin(theta) * xy)
+    return randomDir
+  }, [randomDir])
+
+  const chooseAutoRoamTarget = useCallback((camera, options = {}) => {
+    if (!bodyRefs?.current) return null
+
+    const byKey = bodyRefs.current
+    const keys = Object.keys(byKey)
+    const sunHit = byKey.Sun
+    const planetKeys = keys.filter((key) => key !== 'Sun' && !key.includes('/'))
+    const moonKeys = keys.filter((key) => key.includes('/'))
+    const hasBelts = Boolean(orbitalBands?.asteroidBelt && orbitalBands?.kuiperBelt)
+    const preferInner = Boolean(options.preferInner)
+    const previousType = options.previousType ?? null
+    const preferredMoonParent = options.preferredMoonParent ?? null
+    let focusKey = null
+
+    const preferredMoonKeys = preferredMoonParent
+      ? moonKeys.filter((key) => key.startsWith(`${preferredMoonParent}/`))
+      : []
+    if (preferredMoonKeys.length && Math.random() < 0.78) {
+      const moonKey = preferredMoonKeys[Math.floor(Math.random() * preferredMoonKeys.length)]
+      const hit = byKey[moonKey]
+      if (hit) {
+        hit.mesh.getWorldPosition(focusPos)
+        focusKey = moonKey
+      }
+    }
+
+    const weightedTypes = [
+      { type: 'sun', weight: preferInner ? 0.15 : 0.12 },
+      { type: 'planet', weight: preferInner ? 0.52 : 0.44 },
+      { type: 'moon', weight: moonKeys.length ? (preferInner ? 0.33 : 0.32) : 0 }
+    ]
+    if (hasBelts) {
+      weightedTypes.push({ type: 'asteroid', weight: preferInner ? 0.02 : 0.07 })
+      weightedTypes.push({ type: 'kuiper', weight: preferInner ? 0 : 0.04 })
+    }
+    if (sceneConfig?.oortRadius) {
+      weightedTypes.push({ type: 'oort', weight: preferInner ? 0 : 0.01 })
+    }
+
+    const filteredTypes = weightedTypes.filter((entry) => entry.weight > 0 && (entry.type !== previousType || Math.random() < 0.35))
+    const totalWeight = filteredTypes.reduce((sum, entry) => sum + entry.weight, 0)
+    let pick = Math.random() * (totalWeight || 1)
+    let type = 'sun'
+    for (const entry of filteredTypes) {
+      pick -= entry.weight
+      if (pick <= 0) {
+        type = entry.type
+        break
+      }
+    }
+
+    let focusRadius = 1
+    if (focusKey && focusKey.includes('/')) {
+      const hit = byKey[focusKey]
+      if (hit) {
+        hit.mesh.getWorldPosition(focusPos)
+        focusRadius = hit.radius
+        type = 'moon'
+      }
+    } else if (type === 'moon') {
+      const key = moonKeys[Math.floor(Math.random() * moonKeys.length)]
+      const hit = byKey[key]
+      if (!hit) return null
+      hit.mesh.getWorldPosition(focusPos)
+      focusRadius = hit.radius
+      focusKey = key
+    } else if (type === 'planet') {
+      const key = planetKeys[Math.floor(Math.random() * planetKeys.length)]
+      const hit = byKey[key]
+      if (!hit) return null
+      hit.mesh.getWorldPosition(focusPos)
+      focusRadius = hit.radius
+      focusKey = key
+    } else if (type === 'sun') {
+      if (!sunHit) return null
+      sunHit.mesh.getWorldPosition(focusPos)
+      focusRadius = sunHit.radius
+      focusKey = 'Sun'
+    } else if (type === 'asteroid' || type === 'kuiper') {
+      const band = type === 'asteroid' ? orbitalBands?.asteroidBelt : orbitalBands?.kuiperBelt
+      if (!band) return null
+      const bandRadius = THREE.MathUtils.lerp(band.inner, band.outer, Math.random())
+      const theta = Math.random() * Math.PI * 2
+      focusPos.set(Math.cos(theta) * bandRadius, (Math.random() - 0.5) * (type === 'asteroid' ? 25 : 80), Math.sin(theta) * bandRadius)
+      focusRadius = type === 'asteroid' ? 35 : 130
+    } else {
+      const radius = sceneConfig?.oortRadius ?? 3_300_000
+      const spread = sceneConfig?.oortSpread ?? 550_000
+      const dir = randomUnitVector()
+      const r = radius + (Math.random() - 0.5) * spread
+      focusPos.copy(dir).multiplyScalar(r)
+      focusRadius = radius * 0.04
+    }
+
+    const dir = randomUnitVector()
+    let surfaceBuffer
+    if (type === 'moon') {
+      surfaceBuffer = Math.max(focusRadius * (scientificMode ? 1.35 : 1.8), scientificMode ? 16 : 2.2)
+    } else if (type === 'planet') {
+      surfaceBuffer = Math.max(focusRadius * (scientificMode ? 1.6 : 2.1), scientificMode ? 60 : 4.2)
+    } else if (type === 'sun') {
+      surfaceBuffer = Math.max(focusRadius * (scientificMode ? 1.45 : 1.8), scientificMode ? 120 : 8)
+    } else if (type === 'asteroid') {
+      surfaceBuffer = scientificMode ? 250 : 20
+    } else if (type === 'kuiper') {
+      surfaceBuffer = scientificMode ? 950 : 60
+    } else {
+      surfaceBuffer = scientificMode ? 9_500 : 80
+    }
+    if (focusRadius <= 0) surfaceBuffer = scientificMode ? 180 : 8
+
+    const earthNearSurfaceBuffer = MAP_ENTER_SURFACE_BUFFER + 0.36
+    if (focusKey === 'Earth') {
+      const earthStandOff = focusRadius + earthNearSurfaceBuffer + Math.random() * 0.12
+      waypointPos.copy(focusPos).addScaledVector(dir, earthStandOff)
+    } else {
+      waypointPos.copy(focusPos).addScaledVector(dir, focusRadius + surfaceBuffer + Math.random() * surfaceBuffer * 0.85)
+    }
+
+    const earthHit = byKey.Earth
+    if (earthHit) {
+      earthHit.mesh.getWorldPosition(earthPos)
+      const minEarthDistance = earthHit.radius + MAP_ENTER_SURFACE_BUFFER + 0.4
+      const earthDistance = waypointPos.distanceTo(earthPos)
+      if (earthDistance < minEarthDistance) {
+        const away = waypointPos.sub(earthPos)
+        if (away.lengthSq() < 1e-6) away.copy(camera.position).sub(earthPos)
+        if (away.lengthSq() < 1e-6) away.set(1, 0.2, 0.4)
+        away.normalize()
+        waypointPos.copy(earthPos).addScaledVector(away, minEarthDistance + 0.06)
+      }
+    }
+
+    return {
+      focus: focusPos.clone(),
+      waypoint: waypointPos.clone(),
+      type,
+      focusKey,
+      arrivalDistance: focusKey === 'Earth'
+        ? 0.42
+        : type === 'moon'
+          ? Math.max(focusRadius * (scientificMode ? 1.02 : 1.2), scientificMode ? 4 : 1.5)
+          : Math.max(focusRadius * 1.24, scientificMode ? 45 : 6),
+      orbitStrafe: THREE.MathUtils.randFloat(0.55, 0.95),
+      orbitSpin: Math.random() < 0.5 ? -1 : 1
+    }
+  }, [bodyRefs, orbitalBands, sceneConfig, scientificMode, focusPos, randomUnitVector, waypointPos, earthPos])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+
+    const eventName = 'solar:freeroam-input'
+    const handler = (event) => applyScriptedInput(event.detail ?? {})
+
+    window.addEventListener(eventName, handler)
+    window.__solarFreeRoam = {
+      simulate: applyScriptedInput,
+      clear: clearScriptedInput
+    }
+
+    return () => {
+      window.removeEventListener(eventName, handler)
+      if (window.__solarFreeRoam?.simulate === applyScriptedInput) {
+        delete window.__solarFreeRoam
+      }
+    }
+  }, [applyScriptedInput, clearScriptedInput])
+
+  useEffect(() => {
+    if (!enabled || !keyboardEnabled) {
+      pressedRef.current.clear()
+      clearScriptedInput()
+      return undefined
+    }
+
+    const isEditableTarget = (target) => {
+      if (!(target instanceof HTMLElement)) return false
+      if (target.isContentEditable) return true
+      return ['INPUT', 'TEXTAREA', 'SELECT', 'OPTION'].includes(target.tagName)
+    }
+
+    const setKeyState = (event, isPressed) => {
+      if (isEditableTarget(event.target)) return
+      if (!keySets.all.has(event.code)) return
+
+      if (isPressed) pressedRef.current.add(event.code)
+      else pressedRef.current.delete(event.code)
+      event.preventDefault()
+    }
+
+    const handleKeyDown = (event) => setKeyState(event, true)
+    const handleKeyUp = (event) => setKeyState(event, false)
+
+    window.addEventListener('keydown', handleKeyDown, { passive: false })
+    window.addEventListener('keyup', handleKeyUp, { passive: false })
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
+      pressedRef.current.clear()
+      clearScriptedInput()
+    }
+  }, [clearScriptedInput, enabled, keyboardEnabled, keySets])
+
+  useEffect(() => {
+    if (!enabled || !autoRoamEnabled) {
+      lookOffsetRef.current.yaw = 0
+      lookOffsetRef.current.pitch = 0
+      lookDragActiveRef.current = false
+      autoStateRef.current.hasTarget = false
+      return undefined
+    }
+
+    const handleMouseDown = (event) => {
+      const target = event.target
+      if (target instanceof HTMLElement && target.closest('.side-drawer')) return
+      if (event.button !== 0) return
+      lookDragActiveRef.current = true
+    }
+    const handleMouseUp = (event) => {
+      if (event.button !== 0) return
+      lookDragActiveRef.current = false
+    }
+
+    const handleMouseMove = (event) => {
+      if (!lookDragActiveRef.current) return
+      const target = event.target
+      if (target instanceof HTMLElement && target.closest('.side-drawer')) return
+      const sensitivity = 0.0023
+      lookOffsetRef.current.yaw -= event.movementX * sensitivity
+      lookOffsetRef.current.pitch -= event.movementY * sensitivity
+      lookOffsetRef.current.pitch = THREE.MathUtils.clamp(lookOffsetRef.current.pitch, -1.25, 1.25)
+    }
+
+    window.addEventListener('mousedown', handleMouseDown, { passive: true })
+    window.addEventListener('mouseup', handleMouseUp, { passive: true })
+    window.addEventListener('mousemove', handleMouseMove, { passive: true })
+    return () => {
+      window.removeEventListener('mousedown', handleMouseDown)
+      window.removeEventListener('mouseup', handleMouseUp)
+      window.removeEventListener('mousemove', handleMouseMove)
+      lookDragActiveRef.current = false
+      lookOffsetRef.current.yaw = 0
+      lookOffsetRef.current.pitch = 0
+    }
+  }, [autoRoamEnabled, enabled])
+
+  useFrame((state, delta) => {
+    if (!enabled) return
+    const controls = controlsRef.current
+    if (!controls) return
+
+    const pressed = pressedRef.current
+    const scripted = scriptedRef.current
+    const nowMs = performance.now()
+    const autoState = autoStateRef.current
+    const scriptedActive = nowMs <= scripted.untilMs
+    const hasPressed = (codes) => {
+      for (const code of codes) {
+        if (pressed.has(code)) return true
+      }
+      return false
+    }
+    move.set(0, 0, 0)
+
+    state.camera.getWorldDirection(forward)
+    forward.normalize()
+    right.crossVectors(forward, state.camera.up)
+    if (right.lengthSq() < 1e-6) right.set(1, 0, 0)
+    right.normalize()
+    up.copy(state.camera.up).normalize()
+
+    if (autoRoamEnabled) {
+      const shipForward = shipForwardRef.current
+      if (shipForward.lengthSq() < 1e-6) shipForward.copy(forward)
+
+      const speedFactor = THREE.MathUtils.clamp(autoRoamSpeed, 0.1, 1)
+      const travelTimeoutMs = (scientificMode ? 48_000 : 16_000) / Math.max(speedFactor, 0.1)
+      const travelTimedOut = autoState.hasTarget
+        && autoState.mode === 'travel'
+        && nowMs - autoState.travelStartedMs > travelTimeoutMs
+      if (travelTimedOut) autoState.forceInnerNext = true
+
+      const needsTarget = !autoState.hasTarget
+        || travelTimedOut
+        || (autoState.mode === 'orbit' && nowMs >= autoState.holdUntilMs)
+      if (needsTarget) {
+        const next = chooseAutoRoamTarget(state.camera, {
+          preferInner: autoState.forceInnerNext,
+          previousType: autoState.targetType,
+          preferredMoonParent: autoState.targetType === 'planet' ? autoState.focusKey : null
+        })
+        if (next) {
+          autoState.hasTarget = true
+          autoState.mode = 'travel'
+          autoState.holdUntilMs = 0
+          autoState.travelStartedMs = nowMs
+          autoState.targetType = next.type
+          autoState.focusKey = next.focusKey ?? null
+          autoState.arrivalDistance = next.arrivalDistance
+          autoState.orbitSpin = next.orbitSpin
+          autoState.orbitStrafe = next.orbitStrafe
+          autoState.forceInnerNext = next.type === 'oort' || next.type === 'kuiper'
+          focusPos.copy(next.focus)
+          waypointPos.copy(next.waypoint)
+        }
+      }
+
+      if (autoState.hasTarget) {
+        targetPos.copy(autoState.mode === 'travel' ? waypointPos : focusPos)
+        targetDir.copy(targetPos).sub(state.camera.position)
+        const targetDistance = targetDir.length()
+
+        if (autoState.mode === 'travel' && targetDistance <= autoState.arrivalDistance) {
+          autoState.mode = 'orbit'
+          autoState.holdUntilMs = nowMs + (
+            (autoState.targetType === 'moon' || autoState.targetType === 'planet')
+              ? THREE.MathUtils.randInt(5_400, 12_000)
+              : THREE.MathUtils.randInt(2_600, 6_200)
+          )
+        }
+
+        if (autoState.mode === 'travel') {
+          if (targetDistance > 1e-4) desiredDir.copy(targetDir).divideScalar(targetDistance)
+          else desiredDir.copy(shipForward)
+        } else {
+          radialDir.copy(state.camera.position).sub(focusPos)
+          if (radialDir.lengthSq() < 1e-6) radialDir.copy(randomUnitVector())
+          radialDir.normalize()
+
+          tangentDir.crossVectors(worldUp, radialDir)
+          if (tangentDir.lengthSq() < 1e-6) tangentDir.crossVectors(axisX, radialDir)
+          tangentDir.normalize().multiplyScalar(autoState.orbitSpin)
+
+          desiredDir.copy(tangentDir).multiplyScalar(0.82)
+          desiredDir.addScaledVector(radialDir, -0.34)
+          desiredDir.normalize()
+        }
+
+        shipForward.lerp(desiredDir, THREE.MathUtils.clamp(delta * 1.7, 0.03, 0.24))
+        if (shipForward.lengthSq() < 1e-6) shipForward.copy(desiredDir)
+        shipForward.normalize()
+
+        shipRight.crossVectors(shipForward, worldUp)
+        if (shipRight.lengthSq() < 1e-6) shipRight.set(1, 0, 0)
+        shipRight.normalize()
+        shipUp.crossVectors(shipRight, shipForward).normalize()
+
+        move.copy(shipForward)
+        if (autoState.mode === 'orbit') {
+          move.addScaledVector(shipRight, autoState.orbitStrafe * 0.22)
+          move.addScaledVector(shipUp, Math.sin(nowMs * 0.00043) * 0.05)
+        }
+        move.normalize()
+
+        const travelSpeed = scientificMode
+          ? THREE.MathUtils.clamp(targetDistance * 0.22, 45, 95_000)
+          : THREE.MathUtils.clamp(targetDistance * 0.18, 4, 3_600)
+        const orbitSpeed = scientificMode
+          ? THREE.MathUtils.clamp(targetDistance * 0.08, 12, 14_000)
+          : THREE.MathUtils.clamp(targetDistance * 0.07, 1, 320)
+        const closeBodySlowdown = (autoState.targetType === 'planet' || autoState.targetType === 'moon')
+          ? THREE.MathUtils.clamp(targetDistance / (autoState.arrivalDistance * 3.2), 0.28, 1)
+          : 1
+        const rawSpeedPerSecond = (autoState.mode === 'travel' ? travelSpeed : orbitSpeed) * speedFactor * closeBodySlowdown
+        const requestedStep = rawSpeedPerSecond * delta
+        const maxTravelStep = Math.max(targetDistance * 0.32, autoState.arrivalDistance * 0.22)
+        const safeStep = autoState.mode === 'travel'
+          ? Math.min(requestedStep, maxTravelStep)
+          : requestedStep
+        step.copy(move).multiplyScalar(safeStep)
+        state.camera.position.add(step)
+
+        if (bodyRefs?.current?.Earth) {
+          const earthHit = bodyRefs.current.Earth
+          earthHit.mesh.getWorldPosition(earthPos)
+          const minEarthDistance = earthHit.radius + MAP_ENTER_SURFACE_BUFFER + 0.34
+          const currentEarthDistance = state.camera.position.distanceTo(earthPos)
+          if (currentEarthDistance < minEarthDistance) {
+            targetDir.copy(state.camera.position).sub(earthPos)
+            if (targetDir.lengthSq() < 1e-6) targetDir.set(1, 0.2, 0.6)
+            targetDir.normalize()
+            const correction = minEarthDistance - currentEarthDistance + 0.02
+            state.camera.position.addScaledVector(targetDir, correction)
+          }
+        }
+
+        lookBaseDir.copy(focusPos).sub(state.camera.position)
+        if (lookBaseDir.lengthSq() < 1e-6) lookBaseDir.copy(shipForward)
+        else lookBaseDir.normalize()
+        desiredDir.copy(lookBaseDir).multiplyScalar(-1)
+        shipMatrix.makeBasis(shipRight, shipUp, desiredDir)
+        shipQuat.setFromRotationMatrix(shipMatrix)
+        lookEuler.set(lookOffsetRef.current.pitch, lookOffsetRef.current.yaw, 0)
+        lookQuat.setFromEuler(lookEuler)
+        state.camera.quaternion.copy(shipQuat).multiply(lookQuat)
+        state.camera.getWorldDirection(lookDir)
+
+        const lookDistance = Math.max(
+          state.camera.position.distanceTo(focusPos),
+          scientificMode ? 45 : 6
+        )
+        controls.target.copy(state.camera.position).addScaledVector(lookDir, lookDistance)
+        controls.update()
+        return
+      }
+    }
+
+    if (hasPressed(keySets.forward)) move.add(forward)
+    if (hasPressed(keySets.backward)) move.sub(forward)
+    if (hasPressed(keySets.right)) move.add(right)
+    if (hasPressed(keySets.left)) move.sub(right)
+    if (hasPressed(keySets.up)) move.add(up)
+    if (hasPressed(keySets.down)) move.sub(up)
+
+    if (scriptedActive) {
+      move.addScaledVector(forward, scripted.forward)
+      move.addScaledVector(right, scripted.right)
+      move.addScaledVector(up, scripted.up)
+
+      if (scripted.yaw !== 0 || scripted.pitch !== 0) {
+        viewEuler.setFromQuaternion(state.camera.quaternion)
+        viewEuler.y += scripted.yaw * delta
+        viewEuler.x = THREE.MathUtils.clamp(viewEuler.x + scripted.pitch * delta, -1.55, 1.55)
+        state.camera.quaternion.setFromEuler(viewEuler)
+
+        state.camera.getWorldDirection(lookDir)
+        const targetDistance = Math.max(state.camera.position.distanceTo(controls.target), 1)
+        controls.target.copy(state.camera.position).addScaledVector(lookDir, targetDistance)
+      }
+    }
+
+    if (move.lengthSq() < 1e-8) {
+      controls.update()
+      return
+    }
+    move.normalize()
+
+    const cameraRadius = state.camera.position.length()
+    const baseSpeed = scientificMode
+      ? THREE.MathUtils.clamp(cameraRadius * 0.0024, 25, 15_000)
+      : THREE.MathUtils.clamp(cameraRadius * 0.08, 3, 180)
+    const keyboardBoost = hasPressed(keySets.turbo) ? 2.5 : 1
+    const scriptedBoost = scriptedActive ? scripted.boost : 1
+    const boost = keyboardBoost * scriptedBoost
+    const distance = baseSpeed * boost * delta
+
+    step.copy(move).multiplyScalar(distance)
+    state.camera.position.add(step)
+    controls.target.add(step)
+    controls.update()
+  })
+
+  return null
+}
+
 function Sun({ sunData, onSelect, registerBodyRef, scientificMode = false }) {
   const sunGroupRef = useRef()
   const coreRef = useRef()
@@ -1691,7 +2267,10 @@ function Scene({
   setCameraMode,
   showOrbitLines,
   onEarthTelemetry,
-  lockPlanetFocus
+  lockPlanetFocus,
+  freeRoamEnabled,
+  autoRoamEnabled,
+  autoRoamSpeed
 }) {
   const bodyRefs = useRef({})
   const controlsRef = useRef()
@@ -1709,7 +2288,9 @@ function Scene({
 
   const earthPos = useMemo(() => new THREE.Vector3(), [])
   const controlsMaxDistance = scientificMode
-    ? (selectedTargetKey === 'Sun' ? sceneConfig.controlsMaxDistanceSun : sceneConfig.controlsMaxDistancePlanet)
+    ? ((!followSelected || !selectedTargetKey || selectedTargetKey === 'Sun')
+        ? sceneConfig.controlsMaxDistanceSun
+        : sceneConfig.controlsMaxDistancePlanet)
     : sceneConfig.controlsMaxDistance
   const sceneVariantKey = scientificMode ? 'scientific' : 'fun'
   const scientificFieldKey = `${sceneVariantKey}-field-${sceneConfig.scientificStarFieldCount ?? 0}-${sceneConfig.scientificStarFieldSizeMultiplier ?? 1}-${sceneConfig.scientificStarFieldBrightnessMultiplier ?? 1}`
@@ -1731,7 +2312,7 @@ function Scene({
 
     if (scientificMode) {
       const cameraRadius = state.camera.position.length()
-      const focusKey = selectedTargetKey || selectedName || 'Earth'
+      const focusKey = selectedTargetKey || selectedName || 'Sun'
       const focusPlanet = focusKey.includes('/') ? focusKey.split('/')[0] : focusKey
       const innerFocus = INNER_SYSTEM_PLANETS.includes(focusPlanet)
 
@@ -1901,9 +2482,21 @@ function Scene({
         homeCamera={sceneConfig.homeCamera}
         lockPlanetFocus={lockPlanetFocus}
       />
+      <FreeRoamController
+        enabled={freeRoamEnabled || autoRoamEnabled}
+        keyboardEnabled={freeRoamEnabled}
+        autoRoamEnabled={autoRoamEnabled}
+        autoRoamSpeed={autoRoamSpeed}
+        scientificMode={scientificMode}
+        controlsRef={controlsRef}
+        bodyRefs={bodyRefs}
+        orbitalBands={systemOrbitalBands}
+        sceneConfig={sceneConfig}
+      />
 
       <OrbitControls
         ref={controlsRef}
+        enabled={!autoRoamEnabled}
         enableDamping
         dampingFactor={0.06}
         minDistance={freezeAllMotion ? 0.25 : 0.7}
@@ -1950,6 +2543,9 @@ export default function App() {
   const [speedScale, setSpeedScale] = useState(MIN_SPEED)
   const [cameraMode, setCameraMode] = useState('focus')
   const [followSelected, setFollowSelected] = useState(true)
+  const [freeRoamEnabled, setFreeRoamEnabled] = useState(false)
+  const [autoRoamEnabled, setAutoRoamEnabled] = useState(false)
+  const [autoRoamSpeed, setAutoRoamSpeed] = useState(1)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [showOrbitLines, setShowOrbitLines] = useState(false)
   const [viewMode, setViewMode] = useState('space')
@@ -1990,6 +2586,8 @@ export default function App() {
   }, [activeBodies, selectedMoonKey, selectedName])
 
   const jumpTo = (name) => {
+    setFreeRoamEnabled(false)
+    setAutoRoamEnabled(false)
     setSelectedMoonKey(null)
     setSelectedName(name)
     setCameraMode('focus')
@@ -1997,6 +2595,8 @@ export default function App() {
   }
 
   const jumpToMoon = (moonKey) => {
+    setFreeRoamEnabled(false)
+    setAutoRoamEnabled(false)
     const [planetName] = moonKey.split('/')
     setSelectedName(planetName)
     setSelectedMoonKey(moonKey)
@@ -2005,10 +2605,8 @@ export default function App() {
   }
 
   const goHome = () => {
-    if (scientificMode) {
-      jumpTo('Earth')
-      return
-    }
+    setFreeRoamEnabled(false)
+    setAutoRoamEnabled(false)
     setSelectedMoonKey(null)
     setSelectedName(null)
     setCameraMode('home')
@@ -2041,6 +2639,7 @@ export default function App() {
 
   const onEarthTelemetry = useCallback(
     ({ distance, earthRadius, earthPosition, cameraPosition }) => {
+      if (autoRoamEnabled) return
       if (viewMode !== 'space') return
       if (cameraMode !== null) return
       if (selectedTargetKey !== 'Earth' || selectedMoonKey) return
@@ -2069,10 +2668,12 @@ export default function App() {
       setFollowSelected(false)
       setCameraMode(null)
     },
-    [cameraMode, selectedMoonKey, selectedTargetKey, viewMode]
+    [autoRoamEnabled, cameraMode, selectedMoonKey, selectedTargetKey, viewMode]
   )
 
   useEffect(() => {
+    setFreeRoamEnabled(false)
+    setAutoRoamEnabled(false)
     setViewMode('space')
     mapTransitionLockRef.current = true
     focusReleaseBlockUntilMsRef.current = Date.now() + 2400
@@ -2257,10 +2858,68 @@ export default function App() {
                 <button type="button" onClick={goHome}>
                   Full System View
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFreeRoamEnabled((prev) => {
+                      const next = !prev
+                      if (next) {
+                        setAutoRoamEnabled(false)
+                        setSelectedMoonKey(null)
+                        setSelectedName(null)
+                        setFollowSelected(false)
+                        setCameraMode(null)
+                      }
+                      return next
+                    })
+                  }}
+                >
+                  {freeRoamEnabled ? 'Disable Free Explore' : 'Enable Free Explore'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAutoRoamEnabled((prev) => {
+                      const next = !prev
+                      if (next) {
+                        setFreeRoamEnabled(false)
+                        setSelectedMoonKey(null)
+                        setSelectedName(null)
+                        setFollowSelected(false)
+                        setCameraMode(null)
+                      }
+                      return next
+                    })
+                  }}
+                >
+                  {autoRoamEnabled ? 'Disable Free Roam Mode' : 'Enable Free Roam Mode'}
+                </button>
                 <button type="button" onClick={() => setShowOrbitLines((prev) => !prev)}>
                   {showOrbitLines ? 'Hide Orbital Lines' : 'Show Orbital Lines'}
                 </button>
               </div>
+              {freeRoamEnabled ? (
+                <p>
+                  Free Explore controls: <code>W/A/S/D</code> or arrows, <code>Q/E</code> for down/up, <code>Shift</code> to boost.
+                </p>
+              ) : null}
+              {autoRoamEnabled ? (
+                <>
+                  <label htmlFor="autoRoamSpeed">Free Roam Speed: {autoRoamSpeed.toFixed(1)}x</label>
+                  <input
+                    id="autoRoamSpeed"
+                    type="range"
+                    min="0.1"
+                    max="1.0"
+                    step="0.1"
+                    value={autoRoamSpeed}
+                    onChange={(e) => setAutoRoamSpeed(Number(e.target.value))}
+                  />
+                  <p>
+                    Free Roam Mode autonomously traverses planets, moons, and outer regions while keeping a safe Earth clearance. Hold left click and drag to look around without changing trajectory.
+                  </p>
+                </>
+              ) : null}
             </div>
 
             {selected ? (
@@ -2330,6 +2989,9 @@ export default function App() {
             showOrbitLines={showOrbitLines}
             onEarthTelemetry={onEarthTelemetry}
             lockPlanetFocus={scientificMode}
+            freeRoamEnabled={freeRoamEnabled}
+            autoRoamEnabled={autoRoamEnabled}
+            autoRoamSpeed={autoRoamSpeed}
           />
           <BloomPostProcessing
             enabled
