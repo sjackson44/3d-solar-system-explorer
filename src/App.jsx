@@ -102,59 +102,6 @@ const PLANET_TO_BODY = {
   Neptune: Body.Neptune,
   Pluto: Body.Pluto
 }
-const SCI_KM_PER_UNIT = 1_000
-const AU_KM = 149_597_870.7
-const AU_UNITS = AU_KM / SCI_KM_PER_UNIT
-const HORIZONS_SCIENTIFIC_ORBITAL_BANDS = {
-  asteroidBelt: {
-    inner: AU_UNITS * 2.2,
-    outer: AU_UNITS * 3.2
-  },
-  kuiperBelt: {
-    inner: AU_UNITS * 30,
-    outer: AU_UNITS * 50
-  }
-}
-
-const SCIENTIFIC_RADIUS_KM_FALLBACK = {
-  Sun: 695700,
-  Mercury: 2439.7,
-  Venus: 6051.8,
-  Earth: 6371.0,
-  Mars: 3389.5,
-  Jupiter: 69911,
-  Saturn: 58232,
-  Uranus: 25362,
-  Neptune: 24622,
-  Pluto: 1188.3,
-  Moon: 1737.4,
-  Phobos: 11.267,
-  Deimos: 6.2,
-  Io: 1821.6,
-  Europa: 1560.8,
-  Ganymede: 2634.1,
-  Callisto: 2410.3,
-  Titan: 2574.7,
-  Enceladus: 252.1,
-  Rhea: 763.8,
-  Iapetus: 734.5,
-  Titania: 788.9,
-  Oberon: 761.4,
-  Umbriel: 584.7,
-  Ariel: 578.9,
-  Miranda: 235.8,
-  Triton: 1353.4,
-  Nereid: 170,
-  Proteus: 210,
-  Larissa: 97,
-  Charon: 606
-}
-
-function vectorMagnitude(vector) {
-  if (!vector) return null
-  return Math.sqrt((vector.x * vector.x) + (vector.y * vector.y) + (vector.z * vector.z))
-}
-
 function configureTexture(texture) {
   if (!texture) return
   texture.anisotropy = 8
@@ -164,42 +111,6 @@ function configureTexture(texture) {
   texture.magFilter = THREE.LinearFilter
   texture.colorSpace = THREE.SRGBColorSpace
   texture.needsUpdate = true
-}
-
-function buildScientificBodiesFromSnapshot(baseBodies, snapshot) {
-  if (!snapshot?.bodies) return baseBodies
-
-  const sunSnapshot = snapshot.bodies.Sun
-  const nextSunRadiusKm = sunSnapshot?.radiusKm ?? SCIENTIFIC_RADIUS_KM_FALLBACK.Sun
-
-  return {
-    ...baseBodies,
-    sun: {
-      ...baseBodies.sun,
-      radius: nextSunRadiusKm / SCI_KM_PER_UNIT
-    },
-    planets: baseBodies.planets.map((planet) => {
-      const planetSnapshot = snapshot.bodies[planet.name]
-      const planetRadiusKm = planetSnapshot?.radiusKm ?? SCIENTIFIC_RADIUS_KM_FALLBACK[planet.name] ?? (planet.radius * SCI_KM_PER_UNIT)
-      const planetDistanceKm = vectorMagnitude(planetSnapshot?.vector)
-
-      return {
-        ...planet,
-        radius: planetRadiusKm / SCI_KM_PER_UNIT,
-        distance: Number.isFinite(planetDistanceKm) ? planetDistanceKm / SCI_KM_PER_UNIT : planet.distance,
-        moons: planet.moons.map((moon) => {
-          const moonSnapshot = snapshot.bodies[moon.name]
-          const moonRadiusKm = moonSnapshot?.radiusKm ?? SCIENTIFIC_RADIUS_KM_FALLBACK[moon.name] ?? (moon.radius * SCI_KM_PER_UNIT)
-          const moonDistanceKm = vectorMagnitude(moonSnapshot?.vector)
-          return {
-            ...moon,
-            radius: moonRadiusKm / SCI_KM_PER_UNIT,
-            distance: Number.isFinite(moonDistanceKm) ? moonDistanceKm / SCI_KM_PER_UNIT : moon.distance
-          }
-        })
-      }
-    })
-  }
 }
 
 function getStartupMoonOrbitAngles(planets) {
@@ -1365,27 +1276,21 @@ function Scene({
 export default function App() {
   const [experienceMode, setExperienceMode] = useState('fun')
   const scientificMode = experienceMode === 'scientific'
-  const [scientificSnapshot, setScientificSnapshot] = useState(null)
   const activeBaseBodies = scientificMode ? scientificBodies : bodies
-  const activeOrbitalBands = scientificMode
-    ? (scientificSnapshot ? HORIZONS_SCIENTIFIC_ORBITAL_BANDS : scientificOrbitalBands)
-    : orbitalBands
+  const activeOrbitalBands = scientificMode ? scientificOrbitalBands : orbitalBands
   const activeSceneConfig = scientificMode ? SCIENTIFIC_SCENE_CONFIG : FUN_SCENE_CONFIG
-  const activeBodies = useMemo(
-    () => (scientificMode ? buildScientificBodiesFromSnapshot(activeBaseBodies, scientificSnapshot) : activeBaseBodies),
-    [activeBaseBodies, scientificMode, scientificSnapshot]
-  )
+  const activeBodies = activeBaseBodies
 
   const startupOrbitAngles = useMemo(
-    () => getStartupOrbitAngles(activeBodies.planets, scientificMode ? scientificSnapshot : null),
-    [activeBodies, scientificMode, scientificSnapshot]
+    () => getStartupOrbitAngles(activeBodies.planets),
+    [activeBodies]
   )
   const startupSpinAngles = useMemo(() => getStartupSpinAngles(activeBodies.planets), [activeBodies])
   const moonStartupAngles = useMemo(
     () => (scientificMode
-      ? getScientificMoonOrbitState(activeBodies.planets, scientificSnapshot)
+      ? getScientificMoonOrbitState(activeBodies.planets)
       : getStartupMoonOrbitAngles(activeBodies.planets)),
-    [activeBodies, scientificMode, scientificSnapshot]
+    [activeBodies, scientificMode]
   )
   const earthPlanet = activeBodies.planets.find((planet) => planet.name === 'Earth')
   const earthStartDistance = earthPlanet?.distance ?? EARTH_FALLBACK_DISTANCE
@@ -1519,27 +1424,6 @@ export default function App() {
     },
     [cameraMode, selectedMoonKey, selectedTargetKey, viewMode]
   )
-
-  useEffect(() => {
-    if (!scientificMode) return undefined
-    let cancelled = false
-    fetch('/api/horizons-bootstrap')
-      .then((response) => {
-        if (!response.ok) throw new Error(`Horizons bootstrap failed (${response.status})`)
-        return response.json()
-      })
-      .then((payload) => {
-        if (cancelled) return
-        setScientificSnapshot(payload)
-      })
-      .catch(() => {
-        if (cancelled) return
-        setScientificSnapshot(null)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [scientificMode])
 
   useEffect(() => {
     setViewMode('space')
