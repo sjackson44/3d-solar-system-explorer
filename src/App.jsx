@@ -1117,12 +1117,13 @@ function CameraPilot({ mode, selectedTargetKey, followSelected, freezeAllMotion,
   return null
 }
 
-function Sun({ sunData, onSelect, registerBodyRef }) {
+function Sun({ sunData, onSelect, registerBodyRef, showFarBeacon = false }) {
   const sunGroupRef = useRef()
   const coreRef = useRef()
   const glowNearRef = useRef()
   const glowFarRef = useRef()
   const sunTexture = useTexture(sunData.texture)
+  const farBeacon = useMemo(() => new Float32Array([0, 0, 0]), [])
 
   useEffect(() => {
     configureTexture(sunTexture)
@@ -1163,6 +1164,23 @@ function Sun({ sunData, onSelect, registerBodyRef }) {
         <sphereGeometry args={[sunData.radius * 1.28, 48, 48]} />
         <meshBasicMaterial color="#ff4a1b" transparent opacity={0.15} blending={THREE.AdditiveBlending} depthWrite={false} />
       </mesh>
+
+      {showFarBeacon ? (
+        <points>
+          <bufferGeometry>
+            <bufferAttribute attach="attributes-position" count={1} array={farBeacon} itemSize={3} />
+          </bufferGeometry>
+          <pointsMaterial
+            color="#ffd48a"
+            size={8}
+            sizeAttenuation={false}
+            transparent
+            opacity={0.85}
+            depthWrite={false}
+            blending={THREE.AdditiveBlending}
+          />
+        </points>
+      ) : null}
     </group>
   )
 }
@@ -1268,7 +1286,7 @@ function Scene({
         speed={sceneConfig.starsSpeed}
       />
 
-      <Sun sunData={systemBodies.sun} onSelect={setSelectedName} registerBodyRef={registerBodyRef} />
+      <Sun sunData={systemBodies.sun} onSelect={setSelectedName} registerBodyRef={registerBodyRef} showFarBeacon={scientificMode} />
 
       {systemBodies.planets.map((planet) => (
         <Planet
