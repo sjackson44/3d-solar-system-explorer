@@ -155,6 +155,17 @@ function vectorMagnitude(vector) {
   return Math.sqrt((vector.x * vector.x) + (vector.y * vector.y) + (vector.z * vector.z))
 }
 
+function configureTexture(texture) {
+  if (!texture) return
+  texture.anisotropy = 8
+  texture.wrapS = THREE.RepeatWrapping
+  texture.wrapT = THREE.ClampToEdgeWrapping
+  texture.minFilter = THREE.LinearMipmapLinearFilter
+  texture.magFilter = THREE.LinearFilter
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.needsUpdate = true
+}
+
 function buildScientificBodiesFromSnapshot(baseBodies, snapshot) {
   if (!snapshot?.bodies) return baseBodies
 
@@ -365,6 +376,13 @@ function loadGoogleMapsScript(apiKey) {
 
       const cleanup = () => {
         window.clearTimeout(timeoutId)
+        if (window.gm_authFailure === authFailureHandler) {
+          if (typeof priorAuthFailure === 'function') {
+            window.gm_authFailure = priorAuthFailure
+          } else {
+            window.gm_authFailure = undefined
+          }
+        }
         try {
           delete window[callbackName]
         } catch {
@@ -382,14 +400,15 @@ function loadGoogleMapsScript(apiKey) {
       }
 
       const priorAuthFailure = window.gm_authFailure
-      window.gm_authFailure = () => {
+      const authFailureHandler = () => {
         if (typeof priorAuthFailure === 'function') priorAuthFailure()
         cleanup()
         reject(new Error('Google Maps authentication failed. Check key restrictions and enabled APIs.'))
       }
+      window.gm_authFailure = authFailureHandler
 
       const script = document.createElement('script')
-      script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=beta&libraries=maps3d&callback=${callbackName}`
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=beta&loading=async&libraries=maps3d&callback=${callbackName}`
       script.async = true
       script.defer = true
       script.onerror = () => {
@@ -773,13 +792,7 @@ function Moon({
   const moonTexture = useTexture(moon.texture)
 
   useEffect(() => {
-    moonTexture.anisotropy = 8
-    moonTexture.wrapS = THREE.RepeatWrapping
-    moonTexture.wrapT = THREE.ClampToEdgeWrapping
-    moonTexture.minFilter = THREE.LinearMipmapLinearFilter
-    moonTexture.magFilter = THREE.LinearFilter
-    moonTexture.colorSpace = THREE.SRGBColorSpace
-    moonTexture.needsUpdate = true
+    configureTexture(moonTexture)
   }, [moonTexture])
 
   useEffect(() => {
@@ -897,8 +910,7 @@ function Planet({
   freezeSolarOrbits,
   freezeAllMotion,
   onSelectMoonTarget,
-  moonStartupAngles,
-  scientificMode
+  moonStartupAngles
 }) {
   const orbitRef = useRef()
   const planetRef = useRef()
@@ -915,19 +927,9 @@ function Planet({
   const ringTex = data.ringTexture ? ringTexCandidate : null
   const isUranus = data.name === 'Uranus'
   const axialTiltRad = THREE.MathUtils.degToRad(data.axialTiltDeg ?? 0)
-  const moonPlaneTiltRad = 0
 
   useEffect(() => {
-    textures.forEach((texture) => {
-      if (!texture) return
-      texture.anisotropy = 8
-      texture.wrapS = THREE.RepeatWrapping
-      texture.wrapT = THREE.ClampToEdgeWrapping
-      texture.minFilter = THREE.LinearMipmapLinearFilter
-      texture.magFilter = THREE.LinearFilter
-      texture.colorSpace = THREE.SRGBColorSpace
-      texture.needsUpdate = true
-    })
+    textures.forEach((texture) => configureTexture(texture))
   }, [textures])
 
   useEffect(() => {
@@ -993,22 +995,20 @@ function Planet({
           ) : null}
         </group>
 
-        <group rotation={[0, 0, moonPlaneTiltRad]}>
-          {data.moons.map((moon) => (
-            <Moon
-              key={`${data.name}-${moon.name}`}
-              moon={moon}
-              parentName={data.name}
-              speedScale={speedScale}
-              registerBodyRef={registerBodyRef}
-              onSelectTarget={onSelectMoonTarget}
-              freezeAllMotion={freezeAllMotion}
-              initialOrbitAngle={moonStartupAngles?.[`${data.name}/${moon.name}`]?.angle ?? moonStartupAngles?.[`${data.name}/${moon.name}`]}
-              orbitInclinationRad={moonStartupAngles?.[`${data.name}/${moon.name}`]?.inclinationRad ?? 0}
-              orbitAscendingNodeRad={moonStartupAngles?.[`${data.name}/${moon.name}`]?.ascendingNodeRad ?? 0}
-            />
-          ))}
-        </group>
+        {data.moons.map((moon) => (
+          <Moon
+            key={`${data.name}-${moon.name}`}
+            moon={moon}
+            parentName={data.name}
+            speedScale={speedScale}
+            registerBodyRef={registerBodyRef}
+            onSelectTarget={onSelectMoonTarget}
+            freezeAllMotion={freezeAllMotion}
+            initialOrbitAngle={moonStartupAngles?.[`${data.name}/${moon.name}`]?.angle ?? moonStartupAngles?.[`${data.name}/${moon.name}`]}
+            orbitInclinationRad={moonStartupAngles?.[`${data.name}/${moon.name}`]?.inclinationRad ?? 0}
+            orbitAscendingNodeRad={moonStartupAngles?.[`${data.name}/${moon.name}`]?.ascendingNodeRad ?? 0}
+          />
+        ))}
       </group>
 
       {showOrbitLines ? <OrbitRing radius={data.distance} color={selectedName === data.name ? '#7babff' : '#2e4e7a'} /> : null}
@@ -1022,6 +1022,7 @@ function CameraPilot({ mode, selectedTargetKey, followSelected, freezeAllMotion,
   const parentPos = useMemo(() => new THREE.Vector3(), [])
   const moonOutward = useMemo(() => new THREE.Vector3(), [])
   const moonSide = useMemo(() => new THREE.Vector3(), [])
+  const worldUp = useMemo(() => new THREE.Vector3(0, 1, 0), [])
   const settledRef = useRef(false)
   const releasedRef = useRef(false)
 
@@ -1075,7 +1076,7 @@ function CameraPilot({ mode, selectedTargetKey, followSelected, freezeAllMotion,
           moonOutward.normalize()
 
           const desiredDistance = freezeAllMotion ? Math.max(hit.radius * 4.2, 1.1) : Math.max(hit.radius * 5.2, 1.4)
-          moonSide.crossVectors(moonOutward, new THREE.Vector3(0, 1, 0))
+          moonSide.crossVectors(moonOutward, worldUp)
           if (moonSide.lengthSq() < 1e-6) moonSide.set(1, 0, 0)
           moonSide.normalize()
           nextPos.copy(target).addScaledVector(moonOutward, desiredDistance)
@@ -1124,13 +1125,7 @@ function Sun({ sunData, onSelect, registerBodyRef }) {
   const sunTexture = useTexture(sunData.texture)
 
   useEffect(() => {
-    sunTexture.anisotropy = 8
-    sunTexture.wrapS = THREE.RepeatWrapping
-    sunTexture.wrapT = THREE.ClampToEdgeWrapping
-    sunTexture.minFilter = THREE.LinearMipmapLinearFilter
-    sunTexture.magFilter = THREE.LinearFilter
-    sunTexture.colorSpace = THREE.SRGBColorSpace
-    sunTexture.needsUpdate = true
+    configureTexture(sunTexture)
   }, [sunTexture])
 
   useFrame((state, delta) => {
@@ -1201,7 +1196,6 @@ function Scene({
   const asteroidRef = useRef()
   const kuiperRef = useRef()
   const oortRef = useRef()
-  const debugLogMsRef = useRef(0)
 
   const registerBodyRef = (name, mesh, radius) => {
     if (!mesh) return
@@ -1215,7 +1209,6 @@ function Scene({
 
   useFrame((state, delta) => {
     const earth = bodyRefs.current.Earth
-    const moon = bodyRefs.current['Earth/Moon']
     if (earth && onEarthTelemetry) {
       earth.mesh.getWorldPosition(earthPos)
       onEarthTelemetry({
@@ -1224,24 +1217,6 @@ function Scene({
         earthPosition: { x: earthPos.x, y: earthPos.y, z: earthPos.z },
         cameraPosition: { x: state.camera.position.x, y: state.camera.position.y, z: state.camera.position.z }
       })
-    }
-
-    if (scientificMode && earth && moon) {
-      const now = performance.now()
-      if (now - debugLogMsRef.current > 1400) {
-        const moonPos = new THREE.Vector3()
-        earth.mesh.getWorldPosition(earthPos)
-        moon.mesh.getWorldPosition(moonPos)
-        const rel = moonPos.clone().sub(earthPos)
-        console.log('[ScientificOrbitDebug]', {
-          earthWorld: { x: earthPos.x, y: earthPos.y, z: earthPos.z },
-          moonWorld: { x: moonPos.x, y: moonPos.y, z: moonPos.z },
-          moonRelative: { x: rel.x, y: rel.y, z: rel.z },
-          moonDistance: rel.length(),
-          selectedTargetKey
-        })
-        debugLogMsRef.current = now
-      }
     }
 
     if (freezeSolarOrbits) return
@@ -1311,7 +1286,6 @@ function Scene({
           freezeAllMotion={freezeAllMotion}
           onSelectMoonTarget={onSelectMoonTarget}
           moonStartupAngles={moonStartupAngles}
-          scientificMode={scientificMode}
         />
       ))}
 
@@ -1414,10 +1388,11 @@ export default function App() {
   const mapTransitionLockRef = useRef(false)
   const focusReleaseBlockUntilMsRef = useRef(0)
   const mapScrollIntentRef = useRef('none')
-  const mapPrevRangeRef = useRef(MAP_DEFAULT_RANGE)
   const mapLastExitMsRef = useRef(0)
   const mapEnteredAtMsRef = useRef(0)
   const mapLastWheelMsRef = useRef(0)
+  const mapEarthVecRef = useRef(new THREE.Vector3())
+  const mapCameraVecRef = useRef(new THREE.Vector3())
 
   const selectedTargetKey = selectedMoonKey || selectedName
   const freezeSolarOrbits = scientificMode || followSelected
@@ -1509,14 +1484,13 @@ export default function App() {
       if (surfaceDistance > MAP_ENTER_SURFACE_BUFFER || mapTransitionLockRef.current) return
 
       mapTransitionLockRef.current = true
-      const earthVec = new THREE.Vector3(earthPosition.x, earthPosition.y, earthPosition.z)
-      const cameraVec = new THREE.Vector3(cameraPosition.x, cameraPosition.y, cameraPosition.z)
+      const earthVec = mapEarthVecRef.current.set(earthPosition.x, earthPosition.y, earthPosition.z)
+      const cameraVec = mapCameraVecRef.current.set(cameraPosition.x, cameraPosition.y, cameraPosition.z)
       const lookDirection = cameraVec.sub(earthVec)
       const nextCenter = worldDirectionToLatLng(lookDirection)
 
       setMapCenter(nextCenter)
       setMapRange(MAP_DEFAULT_RANGE)
-      mapPrevRangeRef.current = MAP_DEFAULT_RANGE
       mapLastExitMsRef.current = 0
       mapEnteredAtMsRef.current = Date.now()
       mapLastWheelMsRef.current = 0
@@ -1554,7 +1528,6 @@ export default function App() {
     mapTransitionLockRef.current = true
     focusReleaseBlockUntilMsRef.current = Date.now() + 2400
     mapScrollIntentRef.current = 'none'
-    mapPrevRangeRef.current = MAP_DEFAULT_RANGE
     mapLastExitMsRef.current = 0
     mapEnteredAtMsRef.current = 0
     mapLastWheelMsRef.current = 0
@@ -1797,7 +1770,6 @@ export default function App() {
               return
             }
 
-            mapPrevRangeRef.current = range
             setMapRange(range)
 
             const intendedZoomOut = mapScrollIntentRef.current === 'out'
