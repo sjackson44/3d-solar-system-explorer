@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls, Stars, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
@@ -8,6 +8,188 @@ const ORBIT_SPEED = 0.2
 const SPIN_SPEED = 1.2
 const MIN_SPEED = 0.2
 const MOON_ORBIT_BASE = 0.012
+const MAP_ENTER_SURFACE_BUFFER = 0.22
+const MAP_ENTER_RELEASE_SURFACE_BUFFER = 0.9
+const MAP_DEFAULT_RANGE = 7_200_000
+const MAP_EXIT_MIN_RANGE = 35_000_000
+const MAP_EXIT_COOLDOWN_MS = 750
+const MAP_EXIT_ARM_DELAY_MS = 1200
+const MAP_EXIT_WHEEL_RECENCY_MS = 450
+const FOLLOW_RELEASE_DISTANCE_MULTIPLIER = 10
+const FOLLOW_RELEASE_MIN_DISTANCE = 18
+
+let googleMapsScriptPromise = null
+
+function loadGoogleMapsScript(apiKey) {
+  if (typeof window === 'undefined') return Promise.reject(new Error('Google Maps requires a browser environment.'))
+  if (window.google?.maps?.importLibrary) return Promise.resolve(window.google.maps)
+  if (!apiKey) return Promise.reject(new Error('Missing Google Maps API key. Set VITE_GOOGLE_MAPS_API_KEY.'))
+
+  if (!googleMapsScriptPromise) {
+    googleMapsScriptPromise = new Promise((resolve, reject) => {
+      const callbackName = `__initGoogleMaps${Date.now()}`
+      const timeoutId = window.setTimeout(() => {
+        reject(new Error('Google Maps timed out while loading.'))
+      }, 15000)
+
+      const cleanup = () => {
+        window.clearTimeout(timeoutId)
+        try {
+          delete window[callbackName]
+        } catch {
+          window[callbackName] = undefined
+        }
+      }
+
+      window[callbackName] = () => {
+        cleanup()
+        if (window.google?.maps?.importLibrary) {
+          resolve(window.google.maps)
+          return
+        }
+        reject(new Error('Google Maps loaded but importLibrary is unavailable.'))
+      }
+
+      const priorAuthFailure = window.gm_authFailure
+      window.gm_authFailure = () => {
+        if (typeof priorAuthFailure === 'function') priorAuthFailure()
+        cleanup()
+        reject(new Error('Google Maps authentication failed. Check key restrictions and enabled APIs.'))
+      }
+
+      const script = document.createElement('script')
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=beta&libraries=maps3d&callback=${callbackName}`
+      script.async = true
+      script.defer = true
+      script.onerror = () => {
+        cleanup()
+        reject(new Error('Failed to load Google Maps script.'))
+      }
+      document.head.appendChild(script)
+    }).catch((error) => {
+      googleMapsScriptPromise = null
+      throw error
+    })
+  }
+
+  return googleMapsScriptPromise
+}
+
+function worldDirectionToLatLng(direction) {
+  const dir = direction.clone().normalize()
+  const lat = THREE.MathUtils.radToDeg(Math.asin(THREE.MathUtils.clamp(dir.y, -1, 1)))
+  const lng = THREE.MathUtils.radToDeg(Math.atan2(dir.z, dir.x))
+  return { lat, lng }
+}
+
+function GoogleMapsPanel({ center, range, onRangeChange, onBackToSpace }) {
+  const map3dRef = useRef(null)
+  const mapNodeRef = useRef(null)
+  const rangeHandlerRef = useRef(null)
+  const fallbackRangeRef = useRef(null)
+  const currentRangeRef = useRef(range)
+  const [status, setStatus] = useState('loading')
+  const [errorMessage, setErrorMessage] = useState('')
+  const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY
+
+  useEffect(() => {
+    let cancelled = false
+
+    loadGoogleMapsScript(apiKey)
+      .then(async () => {
+        if (cancelled || !mapNodeRef.current || map3dRef.current) return
+        const { Map3DElement } = await window.google.maps.importLibrary('maps3d')
+        if (cancelled || !mapNodeRef.current || map3dRef.current) return
+
+        map3dRef.current = new Map3DElement({
+          center,
+          range,
+          tilt: 0,
+          heading: 0,
+          mode: 'HYBRID'
+        })
+
+        rangeHandlerRef.current = () => {
+          const currentRange = map3dRef.current?.range
+          if (typeof currentRange === 'number') {
+            currentRangeRef.current = currentRange
+            onRangeChange(currentRange)
+          }
+        }
+
+        mapNodeRef.current.innerHTML = ''
+        mapNodeRef.current.appendChild(map3dRef.current)
+        map3dRef.current.addEventListener('gmp-rangechange', rangeHandlerRef.current)
+        setStatus('ready')
+        setErrorMessage('')
+      })
+      .catch((error) => {
+        if (cancelled) return
+        setStatus(apiKey ? 'error' : 'missing-key')
+        setErrorMessage(error instanceof Error ? error.message : 'Unknown error loading Google Maps.')
+      })
+
+    return () => {
+      cancelled = true
+      if (map3dRef.current && rangeHandlerRef.current) {
+        map3dRef.current.removeEventListener('gmp-rangechange', rangeHandlerRef.current)
+      }
+    }
+  }, [apiKey, onRangeChange])
+
+  useEffect(() => {
+    if (!map3dRef.current) return
+    map3dRef.current.center = { lat: center.lat, lng: center.lng, altitude: 0 }
+  }, [center])
+
+  useEffect(() => {
+    if (!map3dRef.current || typeof range !== 'number') return
+    map3dRef.current.range = range
+    currentRangeRef.current = range
+  }, [range])
+
+  useEffect(() => {
+    if (status !== 'ready' || !map3dRef.current) return undefined
+    const map3d = map3dRef.current
+
+    fallbackRangeRef.current = Number(map3d.range ?? fallbackRangeRef.current ?? range ?? 0)
+
+    // Fallback path for sessions where gmp-rangechange is intermittent.
+    const intervalId = window.setInterval(() => {
+      const nextRange = Number(map3d.range ?? 0)
+      const prevRange = Number(fallbackRangeRef.current ?? nextRange)
+      fallbackRangeRef.current = nextRange
+      if (Math.abs(nextRange - prevRange) > 500 && Number.isFinite(nextRange) && nextRange > 1000) {
+        onRangeChange(nextRange)
+      }
+    }, 350)
+
+    return () => {
+      window.clearInterval(intervalId)
+    }
+  }, [onRangeChange, range, status])
+
+  return (
+    <div className="map-overlay">
+      <div className="map-toolbar">
+        <button type="button" onClick={() => onBackToSpace('button')}>
+          Return to Solar System
+        </button>
+        <p>Zoom far out in globe mode to jump back to space view.</p>
+      </div>
+      <div ref={mapNodeRef} className="map-canvas" />
+      {status !== 'ready' ? (
+        <div className="map-status">
+          {status === 'missing-key' ? (
+            <p>Google Maps key missing. Add <code>VITE_GOOGLE_MAPS_API_KEY</code> to your environment.</p>
+          ) : (
+            <p>Unable to load Google Maps: {errorMessage || 'Unknown error'}.</p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  )
+}
 
 function OrbitRing({ radius, color = '#2b3c5a' }) {
   const geometry = useMemo(() => {
@@ -404,7 +586,7 @@ function CameraPilot({ mode, selectedTargetKey, followSelected, freezeAllMotion,
       controls.target.lerp(target, 0.18)
       controls.update()
 
-      const releaseDistance = freezeAllMotion ? Math.max(hit.radius * 60, 120) : Math.max(hit.radius * 68, 320)
+      const releaseDistance = Math.max(hit.radius * FOLLOW_RELEASE_DISTANCE_MULTIPLIER, FOLLOW_RELEASE_MIN_DISTANCE)
       const currentDistance = state.camera.position.distanceTo(target)
       if (!releasedRef.current && currentDistance > releaseDistance) {
         releasedRef.current = true
@@ -543,7 +725,8 @@ function Scene({
   onReleaseFollow,
   onSelectMoonTarget,
   setCameraMode,
-  showOrbitLines
+  showOrbitLines,
+  onEarthTelemetry
 }) {
   const bodyRefs = useRef({})
   const controlsRef = useRef()
@@ -556,7 +739,20 @@ function Scene({
     bodyRefs.current[name] = { mesh, radius }
   }
 
-  useFrame((_, delta) => {
+  const earthPos = useMemo(() => new THREE.Vector3(), [])
+
+  useFrame((state, delta) => {
+    const earth = bodyRefs.current.Earth
+    if (earth && onEarthTelemetry) {
+      earth.mesh.getWorldPosition(earthPos)
+      onEarthTelemetry({
+        distance: state.camera.position.distanceTo(earthPos),
+        earthRadius: earth.radius,
+        earthPosition: { x: earthPos.x, y: earthPos.y, z: earthPos.z },
+        cameraPosition: { x: state.camera.position.x, y: state.camera.position.y, z: state.camera.position.z }
+      })
+    }
+
     if (freezeSolarOrbits) return
     if (asteroidRef.current) asteroidRef.current.rotation.y += delta * 0.012 * speedScale
     if (kuiperRef.current) kuiperRef.current.rotation.y += delta * 0.004 * speedScale
@@ -650,6 +846,15 @@ export default function App() {
   const [followSelected, setFollowSelected] = useState(false)
   const [panelOpen, setPanelOpen] = useState(true)
   const [showOrbitLines, setShowOrbitLines] = useState(false)
+  const [viewMode, setViewMode] = useState('space')
+  const [mapCenter, setMapCenter] = useState({ lat: 0, lng: 0 })
+  const [mapRange, setMapRange] = useState(MAP_DEFAULT_RANGE)
+  const mapTransitionLockRef = useRef(false)
+  const mapScrollIntentRef = useRef('none')
+  const mapPrevRangeRef = useRef(MAP_DEFAULT_RANGE)
+  const mapLastExitMsRef = useRef(0)
+  const mapEnteredAtMsRef = useRef(0)
+  const mapLastWheelMsRef = useRef(0)
 
   const selectedTargetKey = selectedMoonKey || selectedName
   const freezeSolarOrbits = followSelected
@@ -698,36 +903,126 @@ export default function App() {
     setFollowSelected(false)
   }
 
+  const returnToSpaceFromMap = useCallback((source = 'unknown') => {
+    mapTransitionLockRef.current = true
+    setViewMode('space')
+    setSelectedMoonKey(null)
+    setSelectedName('Earth')
+    setFollowSelected(true)
+    setCameraMode('focus')
+  }, [])
+
+  useEffect(() => {
+    if (viewMode !== 'map') return undefined
+
+    const handleWheelIntent = (event) => {
+      mapLastWheelMsRef.current = Date.now()
+      mapScrollIntentRef.current = event.deltaY > 0 ? 'out' : event.deltaY < 0 ? 'in' : mapScrollIntentRef.current
+    }
+
+    window.addEventListener('wheel', handleWheelIntent, { passive: true, capture: true })
+    return () => {
+      window.removeEventListener('wheel', handleWheelIntent, { capture: true })
+      mapScrollIntentRef.current = 'none'
+    }
+  }, [viewMode])
+
+  const onEarthTelemetry = useCallback(
+    ({ distance, earthRadius, earthPosition, cameraPosition }) => {
+      if (viewMode !== 'space') return
+      if (selectedTargetKey !== 'Earth' || selectedMoonKey) return
+
+      const surfaceDistance = distance - earthRadius
+
+      if (surfaceDistance > MAP_ENTER_RELEASE_SURFACE_BUFFER) {
+        mapTransitionLockRef.current = false
+      }
+
+      if (surfaceDistance > MAP_ENTER_SURFACE_BUFFER || mapTransitionLockRef.current) return
+
+      mapTransitionLockRef.current = true
+      const earthVec = new THREE.Vector3(earthPosition.x, earthPosition.y, earthPosition.z)
+      const cameraVec = new THREE.Vector3(cameraPosition.x, cameraPosition.y, cameraPosition.z)
+      const lookDirection = cameraVec.sub(earthVec)
+      const nextCenter = worldDirectionToLatLng(lookDirection)
+
+      setMapCenter(nextCenter)
+      setMapRange(MAP_DEFAULT_RANGE)
+      mapPrevRangeRef.current = MAP_DEFAULT_RANGE
+      mapLastExitMsRef.current = 0
+      mapEnteredAtMsRef.current = Date.now()
+      mapLastWheelMsRef.current = 0
+      mapScrollIntentRef.current = 'none'
+      setViewMode('map')
+      setFollowSelected(false)
+      setCameraMode(null)
+    },
+    [selectedMoonKey, selectedTargetKey, viewMode]
+  )
+
   return (
     <div className="app-shell">
-      <Canvas
-        camera={{ position: [0, 60, 260], fov: 52, near: 0.1, far: 70000 }}
-        shadows
-        onPointerMissed={() => {
-          if (cameraMode === null) {
-            setSelectedMoonKey(null)
-            setSelectedName(null)
-            setFollowSelected(false)
-          }
-        }}
-      >
-        <color attach="background" args={['#02040a']} />
-        <Scene
-          selectedName={selectedName}
-          setSelectedName={jumpTo}
-          setSelectedMoonKey={setSelectedMoonKey}
-          speedScale={speedScale}
-          cameraMode={cameraMode}
-          selectedTargetKey={selectedTargetKey}
-          followSelected={followSelected}
-          freezeSolarOrbits={freezeSolarOrbits}
-          freezeAllMotion={freezeAllMotion}
-          onReleaseFollow={() => setFollowSelected(false)}
-          onSelectMoonTarget={(planetName, moonName) => jumpToMoon(`${planetName}/${moonName}`)}
-          setCameraMode={setCameraMode}
-          showOrbitLines={showOrbitLines}
+      <div className={`space-stage ${viewMode === 'map' ? 'inactive' : ''}`}>
+        <Canvas
+          camera={{ position: [0, 60, 260], fov: 52, near: 0.1, far: 70000 }}
+          shadows
+          frameloop={viewMode === 'map' ? 'demand' : 'always'}
+          onPointerMissed={() => {
+            if (cameraMode === null) {
+              setSelectedMoonKey(null)
+              setSelectedName(null)
+              setFollowSelected(false)
+            }
+          }}
+        >
+          <color attach="background" args={['#02040a']} />
+          <Scene
+            selectedName={selectedName}
+            setSelectedName={jumpTo}
+            setSelectedMoonKey={setSelectedMoonKey}
+            speedScale={speedScale}
+            cameraMode={cameraMode}
+            selectedTargetKey={selectedTargetKey}
+            followSelected={followSelected}
+            freezeSolarOrbits={freezeSolarOrbits}
+            freezeAllMotion={freezeAllMotion}
+            onReleaseFollow={() => setFollowSelected(false)}
+            onSelectMoonTarget={(planetName, moonName) => jumpToMoon(`${planetName}/${moonName}`)}
+            setCameraMode={setCameraMode}
+            showOrbitLines={showOrbitLines}
+            onEarthTelemetry={onEarthTelemetry}
+          />
+        </Canvas>
+      </div>
+
+      {viewMode === 'map' ? (
+        <GoogleMapsPanel
+          center={mapCenter}
+          range={mapRange}
+          onRangeChange={(range) => {
+            if (!Number.isFinite(range) || range <= 1000) {
+              return
+            }
+
+            const previousRange = mapPrevRangeRef.current
+            mapPrevRangeRef.current = range
+            setMapRange(range)
+
+            const intendedZoomOut = mapScrollIntentRef.current === 'out'
+            const nowMs = Date.now()
+            const cooldownElapsed = nowMs - mapLastExitMsRef.current > MAP_EXIT_COOLDOWN_MS
+            const armDelayElapsed = nowMs - mapEnteredAtMsRef.current > MAP_EXIT_ARM_DELAY_MS
+            const recentWheel = nowMs - mapLastWheelMsRef.current <= MAP_EXIT_WHEEL_RECENCY_MS
+            const reachedExitRange = range >= MAP_EXIT_MIN_RANGE
+
+            if (intendedZoomOut && reachedExitRange && cooldownElapsed && armDelayElapsed && recentWheel) {
+              mapLastExitMsRef.current = nowMs
+              returnToSpaceFromMap('scroll-range-intent')
+            }
+          }}
+          onBackToSpace={returnToSpaceFromMap}
         />
-      </Canvas>
+      ) : null}
 
       <button
         type="button"
