@@ -1,0 +1,227 @@
+:root {
+  font-family: 'Avenir Next', 'Segoe UI', sans-serif;
+  color: #e8f1ff;
+  background: #02040a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.app-shell {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  background:
+    radial-gradient(circle at 70% 30%, rgba(57, 96, 196, 0.18), transparent 44%),
+    radial-gradient(circle at 20% 80%, rgba(15, 130, 142, 0.16), transparent 38%),
+    linear-gradient(140deg, #010207, #050a16 50%, #070d1d);
+}
+
+.hamburger-btn {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  gap: 5px;
+  align-content: center;
+  justify-items: center;
+  border-radius: 12px;
+  border: 1px solid rgba(146, 190, 255, 0.5);
+  background: rgba(10, 25, 50, 0.82);
+  cursor: pointer;
+  z-index: 30;
+}
+
+.hamburger-btn span {
+  width: 20px;
+  height: 2px;
+  background: #e6f0ff;
+  border-radius: 999px;
+}
+
+.hamburger-btn.open span:nth-child(1) {
+  transform: translateY(7px) rotate(45deg);
+}
+
+.hamburger-btn.open span:nth-child(2) {
+  opacity: 0;
+}
+
+.hamburger-btn.open span:nth-child(3) {
+  transform: translateY(-7px) rotate(-45deg);
+}
+
+.side-drawer {
+  position: absolute;
+  left: 1rem;
+  top: 4.2rem;
+  width: min(470px, calc(100vw - 1.2rem));
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  z-index: 20;
+  transform: translateX(calc(-100% - 1rem));
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 180ms ease, opacity 180ms ease;
+}
+
+.side-drawer.open {
+  transform: translateX(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.drawer-header,
+.hud,
+.fact-panel {
+  border-radius: 14px;
+  border: 1px solid rgba(146, 190, 255, 0.42);
+  background: rgba(4, 10, 23, 0.78);
+  backdrop-filter: blur(10px);
+}
+
+.drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.55rem 0.7rem;
+}
+
+.drawer-header h2 {
+  margin: 0;
+  font-size: 0.9rem;
+  letter-spacing: 0.03em;
+}
+
+.drawer-close {
+  color: #ecf4ff;
+  font-weight: 700;
+  padding: 0.2rem 0.55rem;
+  border-radius: 9px;
+  border: 1px solid rgba(146, 190, 255, 0.5);
+  background: rgba(20, 50, 92, 0.72);
+  cursor: pointer;
+}
+
+.drawer-close:hover,
+.hamburger-btn:hover {
+  background: rgba(34, 73, 122, 0.76);
+}
+
+.hud {
+  padding: 0.95rem 1rem;
+}
+
+.hud h1 {
+  margin: 0 0 0.35rem;
+  font-size: clamp(1rem, 2.4vw, 1.45rem);
+  letter-spacing: 0.03em;
+}
+
+.hud p {
+  margin: 0.2rem 0 0.65rem;
+  font-size: 0.92rem;
+  line-height: 1.35;
+  color: #c1d8ff;
+}
+
+.hud label {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: #b8ceff;
+  font-size: 0.88rem;
+}
+
+.hud input[type='range'] {
+  width: 100%;
+  accent-color: #80b9ff;
+  margin-bottom: 0.55rem;
+}
+
+.selector-input {
+  width: 100%;
+  margin: 0 0 0.65rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 10px;
+  border: 1px solid rgba(145, 181, 255, 0.45);
+  background: rgba(13, 33, 62, 0.85);
+  color: #e6f0ff;
+}
+
+.hud-buttons {
+  margin-top: 0.8rem;
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.hud button {
+  border: 1px solid rgba(145, 181, 255, 0.6);
+  background: rgba(19, 46, 84, 0.68);
+  color: #ebf3ff;
+  border-radius: 999px;
+  padding: 0.45rem 0.8rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.hud button:hover {
+  background: rgba(42, 79, 126, 0.72);
+}
+
+.fact-panel {
+  padding: 0.95rem 1rem;
+}
+
+.fact-panel h2 {
+  margin: 0 0 0.6rem;
+  font-size: 1.15rem;
+}
+
+.fact-panel p,
+.fact-panel li {
+  color: #d5e5ff;
+  line-height: 1.35;
+  font-size: 0.92rem;
+}
+
+.fact-panel ul {
+  margin: 0 0 0.7rem;
+  padding-left: 1.15rem;
+}
+
+.fact-panel.muted p {
+  margin: 0;
+}
+
+@media (max-width: 980px) {
+  .side-drawer {
+    width: min(520px, calc(100vw - 1.2rem));
+  }
+}
+
+@media (max-width: 760px) {
+  .side-drawer {
+    left: 0.6rem;
+    top: 3.9rem;
+    width: calc(100vw - 1.2rem);
+  }
+
+  .hamburger-btn {
+    left: 0.6rem;
+    top: 0.6rem;
+  }
+}
