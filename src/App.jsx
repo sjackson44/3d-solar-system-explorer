@@ -203,6 +203,40 @@ function buildScientificSceneConfig(densityKey = 'high') {
     starsFactor: SCIENTIFIC_SCENE_CONFIG.starsFactor * preset.threeStarsSizeMultiplier
   }
 }
+
+function describeRoamTarget(type, focusKey) {
+  if (type === 'asteroid') return 'Asteroid Belt'
+  if (type === 'kuiper') return 'Kuiper Belt'
+  if (type === 'oort') return 'Oort Cloud'
+  if (focusKey?.includes('/')) {
+    const [planet, moon] = focusKey.split('/')
+    return `${moon} (${planet})`
+  }
+  if (focusKey) return focusKey
+  if (type) return `${type.charAt(0).toUpperCase()}${type.slice(1)}`
+  return 'Unknown Target'
+}
+
+function formatRoamDistance(distance) {
+  if (!Number.isFinite(distance)) return '--'
+  const absDistance = Math.abs(distance)
+  if (absDistance >= 1_000_000) return `${(distance / 1_000_000).toFixed(2)}M sim units`
+  if (absDistance >= 1_000) return `${(distance / 1_000).toFixed(1)}k sim units`
+  return `${distance.toFixed(0)} sim units`
+}
+
+function formatRoamEta(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '--'
+  if (seconds < 10) return `${seconds.toFixed(1)}s`
+  if (seconds < 60) return `${Math.round(seconds)}s`
+  const mins = Math.floor(seconds / 60)
+  const secs = Math.round(seconds % 60)
+  if (mins < 60) return `${mins}m ${secs}s`
+  const hours = Math.floor(mins / 60)
+  const remMins = mins % 60
+  return `${hours}h ${remMins}m`
+}
+
 const PLANET_TO_BODY = {
   Mercury: Body.Mercury,
   Venus: Body.Venus,
@@ -1278,6 +1312,9 @@ function Moon({
   registerBodyRef,
   onSelectTarget,
   freezeAllMotion,
+  freezeOrbit = false,
+  parentAxialTiltRad = 0,
+  orbitReference = 'equatorial',
   initialOrbitAngle,
   orbitInclinationRad = 0,
   orbitAscendingNodeRad = 0
@@ -1285,6 +1322,25 @@ function Moon({
   const pivot = useRef()
   const meshRef = useRef()
   const moonTexture = useTexture(moon.texture)
+  const rawInclinationDeg = useMemo(() => {
+    if (!Number.isFinite(orbitInclinationRad)) return 0
+    let deg = THREE.MathUtils.radToDeg(orbitInclinationRad)
+    deg = THREE.MathUtils.euclideanModulo(deg, 360)
+    if (deg > 180) deg = 360 - deg
+    return deg
+  }, [orbitInclinationRad])
+  const effectiveInclinationRad = useMemo(() => {
+    const planarDeg = rawInclinationDeg > 90 ? 180 - rawInclinationDeg : rawInclinationDeg
+    return THREE.MathUtils.degToRad(planarDeg)
+  }, [rawInclinationDeg])
+  const retrograde = useMemo(
+    () => (moon.orbitPeriod < 0) || rawInclinationDeg > 90,
+    [moon.orbitPeriod, rawInclinationDeg]
+  )
+  const referenceTiltRad = useMemo(
+    () => (orbitReference === 'equatorial' ? parentAxialTiltRad : 0),
+    [orbitReference, parentAxialTiltRad]
+  )
 
   useEffect(() => {
     configureTexture(moonTexture)
@@ -1297,8 +1353,10 @@ function Moon({
 
   useFrame((_, delta) => {
     if (!pivot.current || !meshRef.current) return
-    const orbit = freezeAllMotion ? 0 : (1 / Math.max(Math.abs(moon.orbitPeriod), 0.02)) * MOON_ORBIT_BASE * speedScale
-    const direction = moon.orbitPeriod < 0 ? -1 : 1
+    const orbit = (freezeAllMotion || freezeOrbit)
+      ? 0
+      : (1 / Math.max(Math.abs(moon.orbitPeriod), 0.02)) * MOON_ORBIT_BASE * speedScale
+    const direction = retrograde ? -1 : 1
     pivot.current.rotation.y += delta * orbit * direction
     // Most major moons are tidally locked, which reads more naturally here.
     const moonSpin = moon.tidallyLocked === false ? SPIN_SPEED * speedScale : 0
@@ -1306,30 +1364,34 @@ function Moon({
   })
 
   return (
-    <group ref={pivot} rotation={[0, orbitAscendingNodeRad, 0]}>
-      <group rotation={[0, 0, orbitInclinationRad]}>
-        <mesh
-          ref={(ref) => {
-            meshRef.current = ref
-            registerBodyRef(`${parentName}/${moon.name}`, ref, moon.radius)
-          }}
-          position={[moon.distance, 0, 0]}
-          castShadow
-          onClick={(event) => {
-            event.stopPropagation()
-            onSelectTarget(parentName, moon.name)
-          }}
-        >
-          <sphereGeometry args={[moon.radius, 24, 24]} />
-          <meshStandardMaterial
-            map={moonTexture}
-            roughness={0.95}
-            metalness={0.05}
-            emissive={new THREE.Color('#111827')}
-            emissiveMap={moonTexture}
-            emissiveIntensity={0.14}
-          />
-        </mesh>
+    <group ref={pivot}>
+      <group rotation={[0, orbitAscendingNodeRad, 0]}>
+        <group rotation={[0, 0, referenceTiltRad]}>
+          <group rotation={[effectiveInclinationRad, 0, 0]}>
+            <mesh
+              ref={(ref) => {
+                meshRef.current = ref
+                registerBodyRef(`${parentName}/${moon.name}`, ref, moon.radius)
+              }}
+              position={[moon.distance, 0, 0]}
+              castShadow
+              onClick={(event) => {
+                event.stopPropagation()
+                onSelectTarget(parentName, moon.name)
+              }}
+            >
+              <sphereGeometry args={[moon.radius, 24, 24]} />
+              <meshStandardMaterial
+                map={moonTexture}
+                roughness={0.95}
+                metalness={0.05}
+                emissive={new THREE.Color('#111827')}
+                emissiveMap={moonTexture}
+                emissiveIntensity={0.14}
+              />
+            </mesh>
+          </group>
+        </group>
       </group>
     </group>
   )
@@ -1404,6 +1466,7 @@ function Planet({
   showOrbitLines,
   freezeSolarOrbits,
   freezeAllMotion,
+  freezeMoonOrbitKey,
   scientificMode,
   onSelectMoonTarget,
   moonStartupAngles
@@ -1508,20 +1571,26 @@ function Planet({
           ) : null}
         </group>
 
-        {data.moons.map((moon) => (
-          <Moon
-            key={`${data.name}-${moon.name}`}
-            moon={moon}
-            parentName={data.name}
-            speedScale={speedScale}
-            registerBodyRef={registerBodyRef}
-            onSelectTarget={onSelectMoonTarget}
-            freezeAllMotion={freezeAllMotion}
-            initialOrbitAngle={moonStartupAngles?.[`${data.name}/${moon.name}`]?.angle ?? moonStartupAngles?.[`${data.name}/${moon.name}`]}
-            orbitInclinationRad={moonStartupAngles?.[`${data.name}/${moon.name}`]?.inclinationRad ?? 0}
-            orbitAscendingNodeRad={moonStartupAngles?.[`${data.name}/${moon.name}`]?.ascendingNodeRad ?? 0}
-          />
-        ))}
+        {data.moons.map((moon) => {
+          const moonKey = `${data.name}/${moon.name}`
+          return (
+            <Moon
+              key={`${data.name}-${moon.name}`}
+              moon={moon}
+              parentName={data.name}
+              speedScale={speedScale}
+              registerBodyRef={registerBodyRef}
+              onSelectTarget={onSelectMoonTarget}
+              freezeAllMotion={freezeAllMotion}
+              freezeOrbit={Boolean(freezeMoonOrbitKey && freezeMoonOrbitKey === moonKey)}
+              parentAxialTiltRad={axialTiltRad}
+              orbitReference={moon.orbitReference ?? (data.name === 'Earth' ? 'ecliptic' : 'equatorial')}
+              initialOrbitAngle={moonStartupAngles?.[`${data.name}/${moon.name}`]?.angle ?? moonStartupAngles?.[`${data.name}/${moon.name}`]}
+              orbitInclinationRad={moonStartupAngles?.[`${data.name}/${moon.name}`]?.inclinationRad ?? 0}
+              orbitAscendingNodeRad={moonStartupAngles?.[`${data.name}/${moon.name}`]?.ascendingNodeRad ?? 0}
+            />
+          )
+        })}
       </group>
 
       {showOrbitLines ? <OrbitRing radius={data.distance} color={selectedName === data.name ? '#7babff' : '#2e4e7a'} /> : null}
@@ -1634,12 +1703,13 @@ function FreeRoamController({
   enabled = false,
   keyboardEnabled = true,
   autoRoamEnabled = false,
-  autoRoamSpeed = 1,
+  autoRoamSpeed = 0.2,
   scientificMode = false,
   controlsRef,
   bodyRefs,
   orbitalBands,
-  sceneConfig
+  sceneConfig,
+  onAutoRoamStatus
 }) {
   const pressedRef = useRef(new Set())
   const scriptedRef = useRef({
@@ -1661,8 +1731,13 @@ function FreeRoamController({
     arrivalDistance: 20,
     orbitSpin: 1,
     orbitStrafe: 0.7,
+    orbitTurnsTarget: 1,
+    orbitTurnsProgress: 0,
+    orbitPrevAzimuth: null,
     forceInnerNext: false
   })
+  const autoSpeedRef = useRef(0)
+  const autoStatusEmitRef = useRef({ time: 0, signature: 'none' })
   const forward = useMemo(() => new THREE.Vector3(), [])
   const right = useMemo(() => new THREE.Vector3(), [])
   const up = useMemo(() => new THREE.Vector3(), [])
@@ -1687,6 +1762,7 @@ function FreeRoamController({
   const lookEuler = useMemo(() => new THREE.Euler(0, 0, 0, 'YXZ'), [])
   const shipForwardRef = useRef(new THREE.Vector3(0, 0, -1))
   const lookOffsetRef = useRef({ yaw: 0, pitch: 0 })
+  const manualLookDeltaRef = useRef({ yaw: 0, pitch: 0 })
   const lookDragActiveRef = useRef(false)
   const lookDir = useMemo(() => new THREE.Vector3(), [])
   const lookBaseDir = useMemo(() => new THREE.Vector3(), [])
@@ -1732,6 +1808,29 @@ function FreeRoamController({
     scriptedRef.current.yaw = 0
     scriptedRef.current.pitch = 0
   }, [])
+
+  const emitAutoRoamStatus = useCallback((status, nowMs = performance.now()) => {
+    if (!onAutoRoamStatus) return
+    const signature = status
+      ? [
+          status.mode,
+          status.targetLabel,
+          status.focusKey ?? 'none',
+          Math.round((status.distance ?? 0) / 10),
+          Math.round((status.etaSeconds ?? -1) * 5),
+          Math.round((status.holdRemainingSeconds ?? 0) * 5),
+          Math.round((status.orbitTurnsProgress ?? 0) * 10)
+        ].join('|')
+      : 'none'
+    const shouldEmit = (
+      signature !== autoStatusEmitRef.current.signature
+      || nowMs - autoStatusEmitRef.current.time > 220
+    )
+    if (!shouldEmit) return
+    autoStatusEmitRef.current.signature = signature
+    autoStatusEmitRef.current.time = nowMs
+    onAutoRoamStatus(status)
+  }, [onAutoRoamStatus])
 
   const randomUnitVector = useCallback(() => {
     const theta = Math.random() * Math.PI * 2
@@ -1946,12 +2045,27 @@ function FreeRoamController({
   }, [clearScriptedInput, enabled, keyboardEnabled, keySets])
 
   useEffect(() => {
-    if (!enabled || !autoRoamEnabled) {
+    if (!enabled) {
       lookOffsetRef.current.yaw = 0
       lookOffsetRef.current.pitch = 0
+      manualLookDeltaRef.current.yaw = 0
+      manualLookDeltaRef.current.pitch = 0
       lookDragActiveRef.current = false
       autoStateRef.current.hasTarget = false
+      autoStateRef.current.orbitTurnsProgress = 0
+      autoStateRef.current.orbitTurnsTarget = 1
+      autoStateRef.current.orbitPrevAzimuth = null
+      autoSpeedRef.current = 0
+      emitAutoRoamStatus(null)
       return undefined
+    }
+    if (!autoRoamEnabled) {
+      autoStateRef.current.hasTarget = false
+      autoStateRef.current.orbitTurnsProgress = 0
+      autoStateRef.current.orbitTurnsTarget = 1
+      autoStateRef.current.orbitPrevAzimuth = null
+      autoSpeedRef.current = 0
+      emitAutoRoamStatus(null)
     }
 
     const handleMouseDown = (event) => {
@@ -1970,9 +2084,14 @@ function FreeRoamController({
       const target = event.target
       if (target instanceof HTMLElement && target.closest('.side-drawer')) return
       const sensitivity = 0.0023
-      lookOffsetRef.current.yaw -= event.movementX * sensitivity
-      lookOffsetRef.current.pitch -= event.movementY * sensitivity
-      lookOffsetRef.current.pitch = THREE.MathUtils.clamp(lookOffsetRef.current.pitch, -1.25, 1.25)
+      if (autoRoamEnabled) {
+        lookOffsetRef.current.yaw -= event.movementX * sensitivity
+        lookOffsetRef.current.pitch -= event.movementY * sensitivity
+        lookOffsetRef.current.pitch = THREE.MathUtils.clamp(lookOffsetRef.current.pitch, -1.25, 1.25)
+      } else {
+        manualLookDeltaRef.current.yaw -= event.movementX * sensitivity
+        manualLookDeltaRef.current.pitch -= event.movementY * sensitivity
+      }
     }
 
     window.addEventListener('mousedown', handleMouseDown, { passive: true })
@@ -1985,8 +2104,10 @@ function FreeRoamController({
       lookDragActiveRef.current = false
       lookOffsetRef.current.yaw = 0
       lookOffsetRef.current.pitch = 0
+      manualLookDeltaRef.current.yaw = 0
+      manualLookDeltaRef.current.pitch = 0
     }
-  }, [autoRoamEnabled, enabled])
+  }, [autoRoamEnabled, emitAutoRoamStatus, enabled])
 
   useFrame((state, delta) => {
     if (!enabled) return
@@ -2005,13 +2126,8 @@ function FreeRoamController({
       return false
     }
     move.set(0, 0, 0)
-
     state.camera.getWorldDirection(forward)
     forward.normalize()
-    right.crossVectors(forward, state.camera.up)
-    if (right.lengthSq() < 1e-6) right.set(1, 0, 0)
-    right.normalize()
-    up.copy(state.camera.up).normalize()
 
     if (autoRoamEnabled) {
       const shipForward = shipForwardRef.current
@@ -2024,9 +2140,13 @@ function FreeRoamController({
         && nowMs - autoState.travelStartedMs > travelTimeoutMs
       if (travelTimedOut) autoState.forceInnerNext = true
 
+      const orbitReadyToDepart = autoState.hasTarget
+        && autoState.mode === 'orbit'
+        && nowMs >= autoState.holdUntilMs
+        && autoState.orbitTurnsProgress >= autoState.orbitTurnsTarget
       const needsTarget = !autoState.hasTarget
         || travelTimedOut
-        || (autoState.mode === 'orbit' && nowMs >= autoState.holdUntilMs)
+        || orbitReadyToDepart
       if (needsTarget) {
         const next = chooseAutoRoamTarget(state.camera, {
           preferInner: autoState.forceInnerNext,
@@ -2043,10 +2163,27 @@ function FreeRoamController({
           autoState.arrivalDistance = next.arrivalDistance
           autoState.orbitSpin = next.orbitSpin
           autoState.orbitStrafe = next.orbitStrafe
+          autoState.orbitTurnsTarget = 1
+          autoState.orbitTurnsProgress = 0
+          autoState.orbitPrevAzimuth = null
           autoState.forceInnerNext = next.type === 'oort' || next.type === 'kuiper'
           focusPos.copy(next.focus)
           waypointPos.copy(next.waypoint)
         }
+      }
+
+      if (!autoState.hasTarget) {
+        emitAutoRoamStatus({
+          mode: 'acquiring',
+          targetType: null,
+          focusKey: null,
+          targetLabel: 'Acquiring next waypoint',
+          distance: Number.NaN,
+          etaSeconds: Number.NaN,
+          holdRemainingSeconds: 0,
+          orbitTurnsProgress: 0,
+          orbitTurnsTarget: 0
+        }, nowMs)
       }
 
       if (autoState.hasTarget) {
@@ -2058,9 +2195,17 @@ function FreeRoamController({
           autoState.mode = 'orbit'
           autoState.holdUntilMs = nowMs + (
             (autoState.targetType === 'moon' || autoState.targetType === 'planet')
-              ? THREE.MathUtils.randInt(5_400, 12_000)
-              : THREE.MathUtils.randInt(2_600, 6_200)
+              ? THREE.MathUtils.randInt(10_000, 22_000)
+              : THREE.MathUtils.randInt(4_000, 9_000)
           )
+          autoState.orbitTurnsTarget = (autoState.targetType === 'moon' || autoState.targetType === 'planet')
+            ? THREE.MathUtils.randFloat(1.35, 3.35)
+            : autoState.targetType === 'sun'
+              ? THREE.MathUtils.randFloat(0.75, 1.75)
+              : THREE.MathUtils.randFloat(0.45, 1.1)
+          autoState.orbitTurnsProgress = 0
+          radialDir.copy(state.camera.position).sub(focusPos)
+          autoState.orbitPrevAzimuth = Math.atan2(radialDir.z, radialDir.x)
         }
 
         if (autoState.mode === 'travel') {
@@ -2070,6 +2215,15 @@ function FreeRoamController({
           radialDir.copy(state.camera.position).sub(focusPos)
           if (radialDir.lengthSq() < 1e-6) radialDir.copy(randomUnitVector())
           radialDir.normalize()
+
+          const orbitAzimuth = Math.atan2(radialDir.z, radialDir.x)
+          if (typeof autoState.orbitPrevAzimuth === 'number') {
+            let deltaAzimuth = orbitAzimuth - autoState.orbitPrevAzimuth
+            while (deltaAzimuth > Math.PI) deltaAzimuth -= Math.PI * 2
+            while (deltaAzimuth < -Math.PI) deltaAzimuth += Math.PI * 2
+            autoState.orbitTurnsProgress += Math.abs(deltaAzimuth) / (Math.PI * 2)
+          }
+          autoState.orbitPrevAzimuth = orbitAzimuth
 
           tangentDir.crossVectors(worldUp, radialDir)
           if (tangentDir.lengthSq() < 1e-6) tangentDir.crossVectors(axisX, radialDir)
@@ -2097,22 +2251,46 @@ function FreeRoamController({
         move.normalize()
 
         const travelSpeed = scientificMode
-          ? THREE.MathUtils.clamp(targetDistance * 0.22, 45, 95_000)
-          : THREE.MathUtils.clamp(targetDistance * 0.18, 4, 3_600)
+          ? THREE.MathUtils.clamp(targetDistance * 0.11, 22, 32_000)
+          : THREE.MathUtils.clamp(targetDistance * 0.13, 2.2, 780)
         const orbitSpeed = scientificMode
-          ? THREE.MathUtils.clamp(targetDistance * 0.08, 12, 14_000)
-          : THREE.MathUtils.clamp(targetDistance * 0.07, 1, 320)
+          ? THREE.MathUtils.clamp(targetDistance * 0.05, 6, 4_200)
+          : THREE.MathUtils.clamp(targetDistance * 0.045, 0.7, 48)
         const closeBodySlowdown = (autoState.targetType === 'planet' || autoState.targetType === 'moon')
           ? THREE.MathUtils.clamp(targetDistance / (autoState.arrivalDistance * 3.2), 0.28, 1)
           : 1
-        const rawSpeedPerSecond = (autoState.mode === 'travel' ? travelSpeed : orbitSpeed) * speedFactor * closeBodySlowdown
-        const requestedStep = rawSpeedPerSecond * delta
+        const targetSpeedPerSecond = (autoState.mode === 'travel' ? travelSpeed : orbitSpeed) * speedFactor * closeBodySlowdown
+        autoSpeedRef.current = THREE.MathUtils.damp(
+          autoSpeedRef.current,
+          targetSpeedPerSecond,
+          autoState.mode === 'travel' ? 1.9 : 2.6,
+          delta
+        )
+        const requestedStep = autoSpeedRef.current * delta
         const maxTravelStep = Math.max(targetDistance * 0.32, autoState.arrivalDistance * 0.22)
         const safeStep = autoState.mode === 'travel'
           ? Math.min(requestedStep, maxTravelStep)
           : requestedStep
         step.copy(move).multiplyScalar(safeStep)
         state.camera.position.add(step)
+
+        const targetLabel = describeRoamTarget(autoState.targetType, autoState.focusKey)
+        const holdRemainingSeconds = Math.max(0, (autoState.holdUntilMs - nowMs) / 1000)
+        const speedPerSecond = autoSpeedRef.current
+        const etaSeconds = autoState.mode === 'travel'
+          ? (speedPerSecond > 1e-3 ? targetDistance / speedPerSecond : Number.NaN)
+          : holdRemainingSeconds
+        emitAutoRoamStatus({
+          mode: autoState.mode,
+          targetType: autoState.targetType,
+          focusKey: autoState.focusKey ?? null,
+          targetLabel,
+          distance: targetDistance,
+          etaSeconds,
+          holdRemainingSeconds,
+          orbitTurnsProgress: autoState.orbitTurnsProgress,
+          orbitTurnsTarget: autoState.orbitTurnsTarget
+        }, nowMs)
 
         if (bodyRefs?.current?.Earth) {
           const earthHit = bodyRefs.current.Earth
@@ -2128,7 +2306,13 @@ function FreeRoamController({
           }
         }
 
-        lookBaseDir.copy(focusPos).sub(state.camera.position)
+        if (autoState.mode === 'travel') {
+          const nearApproach = targetDistance < autoState.arrivalDistance * 5
+          if (nearApproach) lookBaseDir.copy(focusPos).sub(state.camera.position)
+          else lookBaseDir.copy(shipForward)
+        } else {
+          lookBaseDir.copy(focusPos).sub(state.camera.position)
+        }
         if (lookBaseDir.lengthSq() < 1e-6) lookBaseDir.copy(shipForward)
         else lookBaseDir.normalize()
         desiredDir.copy(lookBaseDir).multiplyScalar(-1)
@@ -2149,6 +2333,36 @@ function FreeRoamController({
       }
     }
 
+    let yawDelta = 0
+    let pitchDelta = 0
+
+    if (scriptedActive) {
+      yawDelta += scripted.yaw * delta
+      pitchDelta += scripted.pitch * delta
+    }
+    yawDelta += manualLookDeltaRef.current.yaw
+    pitchDelta += manualLookDeltaRef.current.pitch
+    manualLookDeltaRef.current.yaw = 0
+    manualLookDeltaRef.current.pitch = 0
+
+    if (yawDelta !== 0 || pitchDelta !== 0) {
+      viewEuler.setFromQuaternion(state.camera.quaternion)
+      viewEuler.y += yawDelta
+      viewEuler.x = THREE.MathUtils.clamp(viewEuler.x + pitchDelta, -1.55, 1.55)
+      state.camera.quaternion.setFromEuler(viewEuler)
+
+      state.camera.getWorldDirection(lookDir)
+      const targetDistance = Math.max(state.camera.position.distanceTo(controls.target), 1)
+      controls.target.copy(state.camera.position).addScaledVector(lookDir, targetDistance)
+    }
+
+    state.camera.getWorldDirection(forward)
+    forward.normalize()
+    right.crossVectors(forward, state.camera.up)
+    if (right.lengthSq() < 1e-6) right.set(1, 0, 0)
+    right.normalize()
+    up.copy(state.camera.up).normalize()
+
     if (hasPressed(keySets.forward)) move.add(forward)
     if (hasPressed(keySets.backward)) move.sub(forward)
     if (hasPressed(keySets.right)) move.add(right)
@@ -2160,17 +2374,6 @@ function FreeRoamController({
       move.addScaledVector(forward, scripted.forward)
       move.addScaledVector(right, scripted.right)
       move.addScaledVector(up, scripted.up)
-
-      if (scripted.yaw !== 0 || scripted.pitch !== 0) {
-        viewEuler.setFromQuaternion(state.camera.quaternion)
-        viewEuler.y += scripted.yaw * delta
-        viewEuler.x = THREE.MathUtils.clamp(viewEuler.x + scripted.pitch * delta, -1.55, 1.55)
-        state.camera.quaternion.setFromEuler(viewEuler)
-
-        state.camera.getWorldDirection(lookDir)
-        const targetDistance = Math.max(state.camera.position.distanceTo(controls.target), 1)
-        controls.target.copy(state.camera.position).addScaledVector(lookDir, targetDistance)
-      }
     }
 
     if (move.lengthSq() < 1e-8) {
@@ -2270,7 +2473,9 @@ function Scene({
   lockPlanetFocus,
   freeRoamEnabled,
   autoRoamEnabled,
-  autoRoamSpeed
+  autoRoamSpeed,
+  onAutoRoamStatus,
+  freezeMoonOrbitKey
 }) {
   const bodyRefs = useRef({})
   const controlsRef = useRef()
@@ -2426,6 +2631,7 @@ function Scene({
           showOrbitLines={showOrbitLines}
           freezeSolarOrbits={freezeSolarOrbits}
           freezeAllMotion={freezeAllMotion}
+          freezeMoonOrbitKey={freezeMoonOrbitKey}
           scientificMode={scientificMode}
           onSelectMoonTarget={onSelectMoonTarget}
           moonStartupAngles={moonStartupAngles}
@@ -2492,11 +2698,12 @@ function Scene({
         bodyRefs={bodyRefs}
         orbitalBands={systemOrbitalBands}
         sceneConfig={sceneConfig}
+        onAutoRoamStatus={onAutoRoamStatus}
       />
 
       <OrbitControls
         ref={controlsRef}
-        enabled={!autoRoamEnabled}
+        enabled={!autoRoamEnabled && !freeRoamEnabled}
         enableDamping
         dampingFactor={0.06}
         minDistance={freezeAllMotion ? 0.25 : 0.7}
@@ -2545,8 +2752,10 @@ export default function App() {
   const [followSelected, setFollowSelected] = useState(true)
   const [freeRoamEnabled, setFreeRoamEnabled] = useState(false)
   const [autoRoamEnabled, setAutoRoamEnabled] = useState(false)
-  const [autoRoamSpeed, setAutoRoamSpeed] = useState(1)
-  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [autoRoamSpeed, setAutoRoamSpeed] = useState(0.2)
+  const [autoRoamStatus, setAutoRoamStatus] = useState(null)
+  const [roamTrackerCollapsed, setRoamTrackerCollapsed] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
   const [showOrbitLines, setShowOrbitLines] = useState(false)
   const [viewMode, setViewMode] = useState('space')
   const [mapCenter, setMapCenter] = useState({ lat: 0, lng: 0 })
@@ -2563,6 +2772,14 @@ export default function App() {
   const selectedTargetKey = selectedMoonKey || selectedName
   const freezeSolarOrbits = scientificMode || followSelected
   const freezeAllMotion = followSelected && Boolean(selectedMoonKey)
+  const scientificMoonFreezeKey = (
+    scientificMode
+    && autoRoamEnabled
+    && autoRoamStatus?.targetType === 'moon'
+    && typeof autoRoamStatus.focusKey === 'string'
+  )
+    ? autoRoamStatus.focusKey
+    : null
 
   const selected = useMemo(() => {
     if (selectedMoonKey) {
@@ -2674,6 +2891,7 @@ export default function App() {
   useEffect(() => {
     setFreeRoamEnabled(false)
     setAutoRoamEnabled(false)
+    setAutoRoamStatus(null)
     setViewMode('space')
     mapTransitionLockRef.current = true
     focusReleaseBlockUntilMsRef.current = Date.now() + 2400
@@ -2687,6 +2905,13 @@ export default function App() {
     setFollowSelected(true)
     setCameraMode('focus')
   }, [experienceMode])
+
+  useEffect(() => {
+    if (!scientificMode || !autoRoamEnabled) {
+      setAutoRoamStatus(null)
+      setRoamTrackerCollapsed(false)
+    }
+  }, [autoRoamEnabled, scientificMode])
 
   useEffect(() => {
     if (viewMode !== 'space') return undefined
@@ -2745,181 +2970,194 @@ export default function App() {
           <div className="sidebar-content">
             <div className="hud">
               <div className="hud-title">
+                <p className="hud-eyebrow">Navigation Console</p>
                 <h1>Solar System Explorer</h1>
                 <p>Navigate planets and moons, then transition between deep-space and Earth map mode.</p>
               </div>
 
-              <div className="mode-switch" role="group" aria-label="Experience mode">
-                <p className="mode-switch-label">Experience Mode</p>
-                <div className="mode-switch-buttons">
-                  <button
-                    type="button"
-                    className={`mode-switch-button ${experienceMode === 'fun' ? 'active' : ''}`}
-                    aria-pressed={experienceMode === 'fun'}
-                    onClick={() => setExperienceMode('fun')}
-                  >
-                    Fun Mode
-                  </button>
-                  <button
-                    type="button"
-                    className={`mode-switch-button ${experienceMode === 'scientific' ? 'active' : ''}`}
-                    aria-pressed={experienceMode === 'scientific'}
-                    onClick={() => setExperienceMode('scientific')}
-                  >
-                    Scientific Mode
-                  </button>
+              <section className="control-cluster">
+                <div className="mode-switch" role="group" aria-label="Experience mode">
+                  <p className="mode-switch-label">Experience Mode</p>
+                  <div className="mode-switch-buttons">
+                    <button
+                      type="button"
+                      className={`mode-switch-button ${experienceMode === 'fun' ? 'active' : ''}`}
+                      aria-pressed={experienceMode === 'fun'}
+                      onClick={() => setExperienceMode('fun')}
+                    >
+                      Fun Mode
+                    </button>
+                    <button
+                      type="button"
+                      className={`mode-switch-button ${experienceMode === 'scientific' ? 'active' : ''}`}
+                      aria-pressed={experienceMode === 'scientific'}
+                      onClick={() => setExperienceMode('scientific')}
+                    >
+                      Scientific Mode
+                    </button>
+                  </div>
                 </div>
-              </div>
-              {scientificMode ? (
-                <>
-                  <label htmlFor="scientificStarDensity">Scientific Star Density</label>
-                  <select
-                    id="scientificStarDensity"
-                    className="selector-input"
-                    value={scientificStarDensity}
-                    onChange={(e) => setScientificStarDensity(e.target.value)}
-                  >
-                    {SCIENTIFIC_STAR_DENSITY_ORDER.map((densityKey) => (
-                      <option key={densityKey} value={densityKey}>
-                        {SCIENTIFIC_STAR_DENSITY_PRESETS[densityKey].label}
-                      </option>
-                    ))}
-                  </select>
-                </>
-              ) : null}
+                {scientificMode ? (
+                  <>
+                    <label htmlFor="scientificStarDensity">Scientific Star Density</label>
+                    <select
+                      id="scientificStarDensity"
+                      className="selector-input"
+                      value={scientificStarDensity}
+                      onChange={(e) => setScientificStarDensity(e.target.value)}
+                    >
+                      {SCIENTIFIC_STAR_DENSITY_ORDER.map((densityKey) => (
+                        <option key={densityKey} value={densityKey}>
+                          {SCIENTIFIC_STAR_DENSITY_PRESETS[densityKey].label}
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                ) : null}
+              </section>
 
-              <label htmlFor="speed">Simulation Speed: {speedScale.toFixed(1)}x</label>
-              <input
-                id="speed"
-                type="range"
-                min={MIN_SPEED}
-                max="4"
-                step="0.1"
-                value={speedScale}
-                onChange={(e) => setSpeedScale(Number(e.target.value))}
-              />
+              <section className="control-cluster">
+                <p className="cluster-title">Simulation</p>
+                <label htmlFor="speed">Simulation Speed: {speedScale.toFixed(1)}x</label>
+                <input
+                  id="speed"
+                  type="range"
+                  min={MIN_SPEED}
+                  max="4"
+                  step="0.1"
+                  value={speedScale}
+                  onChange={(e) => setSpeedScale(Number(e.target.value))}
+                />
+              </section>
 
-              <label htmlFor="bodySelect">Focus Body</label>
-              <select
-                id="bodySelect"
-                className="selector-input"
-                value={selectedName ?? ''}
-                onChange={(e) => {
-                  const value = e.target.value
-                  if (!value) {
-                    goHome()
-                    return
-                  }
-                  jumpTo(value)
-                }}
-              >
-                <option value="">None (Free View)</option>
-                <option value="Sun">Sun</option>
-                {activeBodies.planets.map((planet) => (
-                  <option key={planet.name} value={planet.name}>
-                    {planet.name}
-                  </option>
-                ))}
-              </select>
+              <section className="control-cluster">
+                <p className="cluster-title">Navigation</p>
+                <label htmlFor="bodySelect">Focus Body</label>
+                <select
+                  id="bodySelect"
+                  className="selector-input"
+                  value={selectedName ?? ''}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    if (!value) {
+                      goHome()
+                      return
+                    }
+                    jumpTo(value)
+                  }}
+                >
+                  <option value="">None (Free View)</option>
+                  <option value="Sun">Sun</option>
+                  {activeBodies.planets.map((planet) => (
+                    <option key={planet.name} value={planet.name}>
+                      {planet.name}
+                    </option>
+                  ))}
+                </select>
 
-              {selectedName && selectedName !== 'Sun' ? (
-                <>
-                  <label htmlFor="moonSelect">Moon Focus</label>
-                  <select
-                    id="moonSelect"
-                    className="selector-input"
-                    value={selectedMoonKey ?? ''}
-                    onChange={(e) => {
-                      const value = e.target.value
-                      if (!value) {
-                        setSelectedMoonKey(null)
-                        jumpTo(selectedName)
-                        return
-                      }
-                      jumpToMoon(value)
+                {selectedName && selectedName !== 'Sun' ? (
+                  <>
+                    <label htmlFor="moonSelect">Moon Focus</label>
+                    <select
+                      id="moonSelect"
+                      className="selector-input"
+                      value={selectedMoonKey ?? ''}
+                      onChange={(e) => {
+                        const value = e.target.value
+                        if (!value) {
+                          setSelectedMoonKey(null)
+                          jumpTo(selectedName)
+                          return
+                        }
+                        jumpToMoon(value)
+                      }}
+                    >
+                      <option value="">Planet Center</option>
+                      {activeBodies.planets
+                        .find((planet) => planet.name === selectedName)
+                        ?.moons.map((moon) => {
+                          const moonKey = `${selectedName}/${moon.name}`
+                          return (
+                            <option key={moonKey} value={moonKey}>
+                              {moon.name}
+                            </option>
+                          )
+                        })}
+                    </select>
+                  </>
+                ) : null}
+              </section>
+
+              <section className="control-cluster">
+                <p className="cluster-title">Actions</p>
+                <div className="hud-buttons">
+                  <button type="button" onClick={goHome}>
+                    Full System View
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFreeRoamEnabled((prev) => {
+                        const next = !prev
+                        if (next) {
+                          setAutoRoamEnabled(false)
+                          setSelectedMoonKey(null)
+                          setSelectedName(null)
+                          setFollowSelected(false)
+                          setCameraMode(null)
+                        }
+                        return next
+                      })
                     }}
                   >
-                    <option value="">Planet Center</option>
-                    {activeBodies.planets
-                      .find((planet) => planet.name === selectedName)
-                      ?.moons.map((moon) => {
-                        const moonKey = `${selectedName}/${moon.name}`
-                        return (
-                          <option key={moonKey} value={moonKey}>
-                            {moon.name}
-                          </option>
-                        )
-                      })}
-                  </select>
-                </>
-              ) : null}
-
-              <div className="hud-buttons">
-                <button type="button" onClick={goHome}>
-                  Full System View
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFreeRoamEnabled((prev) => {
-                      const next = !prev
-                      if (next) {
-                        setAutoRoamEnabled(false)
-                        setSelectedMoonKey(null)
-                        setSelectedName(null)
-                        setFollowSelected(false)
-                        setCameraMode(null)
-                      }
-                      return next
-                    })
-                  }}
-                >
-                  {freeRoamEnabled ? 'Disable Free Explore' : 'Enable Free Explore'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAutoRoamEnabled((prev) => {
-                      const next = !prev
-                      if (next) {
-                        setFreeRoamEnabled(false)
-                        setSelectedMoonKey(null)
-                        setSelectedName(null)
-                        setFollowSelected(false)
-                        setCameraMode(null)
-                      }
-                      return next
-                    })
-                  }}
-                >
-                  {autoRoamEnabled ? 'Disable Free Roam Mode' : 'Enable Free Roam Mode'}
-                </button>
-                <button type="button" onClick={() => setShowOrbitLines((prev) => !prev)}>
-                  {showOrbitLines ? 'Hide Orbital Lines' : 'Show Orbital Lines'}
-                </button>
-              </div>
-              {freeRoamEnabled ? (
-                <p>
-                  Free Explore controls: <code>W/A/S/D</code> or arrows, <code>Q/E</code> for down/up, <code>Shift</code> to boost.
-                </p>
-              ) : null}
-              {autoRoamEnabled ? (
-                <>
-                  <label htmlFor="autoRoamSpeed">Free Roam Speed: {autoRoamSpeed.toFixed(1)}x</label>
-                  <input
-                    id="autoRoamSpeed"
-                    type="range"
-                    min="0.1"
-                    max="1.0"
-                    step="0.1"
-                    value={autoRoamSpeed}
-                    onChange={(e) => setAutoRoamSpeed(Number(e.target.value))}
-                  />
-                  <p>
-                    Free Roam Mode autonomously traverses planets, moons, and outer regions while keeping a safe Earth clearance. Hold left click and drag to look around without changing trajectory.
+                    {freeRoamEnabled ? 'Disable Free Explore' : 'Enable Free Explore'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAutoRoamEnabled((prev) => {
+                        const next = !prev
+                        if (next) {
+                          setFreeRoamEnabled(false)
+                          setSelectedMoonKey(null)
+                          setSelectedName(null)
+                          setFollowSelected(false)
+                          setCameraMode(null)
+                        }
+                        return next
+                      })
+                    }}
+                  >
+                    {autoRoamEnabled ? 'Disable Free Roam Mode' : 'Enable Free Roam Mode'}
+                  </button>
+                  <button type="button" onClick={() => setShowOrbitLines((prev) => !prev)}>
+                    {showOrbitLines ? 'Hide Orbital Lines' : 'Show Orbital Lines'}
+                  </button>
+                </div>
+                {freeRoamEnabled ? (
+                  <p className="hud-note">
+                    Free Explore controls: <code>W/A/S/D</code> or arrows, <code>Q/E</code> for down/up, <code>Shift</code> to boost.
                   </p>
-                </>
-              ) : null}
+                ) : null}
+                {autoRoamEnabled ? (
+                  <>
+                    <label htmlFor="autoRoamSpeed">Free Roam Speed: {autoRoamSpeed.toFixed(1)}x</label>
+                    <input
+                      id="autoRoamSpeed"
+                      type="range"
+                      min="0.1"
+                      max="1.0"
+                      step="0.1"
+                      value={autoRoamSpeed}
+                      onChange={(e) => setAutoRoamSpeed(Number(e.target.value))}
+                    />
+                    <p className="hud-note">
+                      Free Roam Mode autonomously traverses planets, moons, and outer regions while keeping a safe Earth clearance.
+                      Hold left click and drag to look around without changing trajectory.
+                    </p>
+                  </>
+                ) : null}
+              </section>
             </div>
 
             {selected ? (
@@ -2936,6 +3174,71 @@ export default function App() {
           </div>
         ) : null}
       </aside>
+      {scientificMode && autoRoamEnabled ? (
+        <div className={`roam-overlay ${roamTrackerCollapsed ? 'collapsed' : ''}`}>
+          <button
+            type="button"
+            className="roam-overlay-toggle"
+            onClick={() => setRoamTrackerCollapsed((prev) => !prev)}
+            aria-expanded={!roamTrackerCollapsed}
+            aria-label={roamTrackerCollapsed ? 'Show scientific roam tracker' : 'Collapse scientific roam tracker'}
+          >
+            {roamTrackerCollapsed ? 'Show Tracker' : 'Hide Tracker'}
+          </button>
+          {!roamTrackerCollapsed ? (
+            <div className="roam-overlay-panel" role="status" aria-live="polite">
+              <p className="roam-overlay-title">Scientific Roam Tracker</p>
+              {autoRoamStatus ? (
+                <>
+                  <p>
+                    <strong>{autoRoamStatus.mode === 'travel'
+                      ? 'Heading To'
+                      : autoRoamStatus.mode === 'orbit'
+                        ? 'Orbiting'
+                        : 'Status'}:</strong>{' '}
+                    {autoRoamStatus.targetLabel}
+                  </p>
+                  {autoRoamStatus.mode !== 'acquiring' ? (
+                    <p><strong>Distance:</strong> {formatRoamDistance(autoRoamStatus.distance)}</p>
+                  ) : null}
+                  {autoRoamStatus.mode !== 'acquiring' ? (
+                    <p>
+                      <strong>{autoRoamStatus.mode === 'travel' ? 'Arrival ETA' : 'Departure ETA'}:</strong>{' '}
+                      {formatRoamEta(
+                        autoRoamStatus.mode === 'travel'
+                          ? autoRoamStatus.etaSeconds
+                          : autoRoamStatus.holdRemainingSeconds
+                      )}
+                    </p>
+                  ) : null}
+                  {autoRoamStatus.mode === 'orbit' ? (
+                    <p>
+                      <strong>Orbit Progress:</strong>{' '}
+                      {autoRoamStatus.orbitTurnsProgress.toFixed(1)} / {autoRoamStatus.orbitTurnsTarget.toFixed(1)} turns
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p><strong>Status:</strong> Acquiring next waypoint...</p>
+              )}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {freeRoamEnabled && viewMode === 'space' ? (
+        <div className="free-explore-overlay" aria-hidden="true">
+          <p className="free-explore-title">Free Explore</p>
+          <div className="free-explore-keys">
+            <span className="free-explore-spacer" />
+            <span className="free-explore-key">W</span>
+            <span className="free-explore-spacer" />
+            <span className="free-explore-key">A</span>
+            <span className="free-explore-key">S</span>
+            <span className="free-explore-key">D</span>
+          </div>
+          <p className="free-explore-note">Move with W A S D</p>
+        </div>
+      ) : null}
       <div className={`space-stage ${viewMode === 'map' ? 'inactive' : ''}`}>
         <Canvas
           key={`space-canvas-${experienceMode}-${scientificMode ? scientificStarDensity : 'fun'}`}
@@ -2992,6 +3295,8 @@ export default function App() {
             freeRoamEnabled={freeRoamEnabled}
             autoRoamEnabled={autoRoamEnabled}
             autoRoamSpeed={autoRoamSpeed}
+            onAutoRoamStatus={scientificMode && autoRoamEnabled ? setAutoRoamStatus : undefined}
+            freezeMoonOrbitKey={scientificMoonFreezeKey}
           />
           <BloomPostProcessing
             enabled
